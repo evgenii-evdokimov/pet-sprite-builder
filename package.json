@@ -1,6 +1,6 @@
 {
   "name": "pet-sprite-builder",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Desktop pet spritesheet builder",
   "main": "main.js",
   "author": "zhenya",
@@ -29,14 +29,13 @@
     ],
     "extraFiles": [
       {
-        "from": "build/launcher-dist/Pet Sprite Builder.exe",
-        "to": "Pet Sprite Builder.exe"
+        "from": "build/launcher-dist/Start Pet Sprite Builder.exe",
+        "to": "Start Pet Sprite Builder.exe"
       }
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico",
-      "executableName": "PetSpriteBuilderCore"
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,

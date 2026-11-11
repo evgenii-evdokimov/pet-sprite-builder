@@ -3,7 +3,7 @@ import sys
 import subprocess
 
 base = os.path.dirname(os.path.abspath(sys.executable))
-core = os.path.join(base, "PetSpriteBuilderCore.exe")
+core = os.path.join(base, "Pet Sprite Builder.exe")
 
 DETACHED_PROCESS = 0x00000008
 CREATE_NEW_PROCESS_GROUP = 0x00000200
