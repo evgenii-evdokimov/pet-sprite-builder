@@ -4,6 +4,9 @@ const fs = require('fs');
 const os = require('os');
 const { spawn } = require('child_process');
 
+const DEFAULT_UPDATE_URL =
+  'https://evgenii-evdokimov.github.io/pet-sprite-builder/latest.json';
+
 // На части систем Chromium-песочница падает с STATUS_BREAKPOINT (0x80000003)
 // ещё до старта окна. `appendSwitch` тут не помогает — флаг должен быть в
 // командной строке, поэтому при отсутствии флага перезапускаем себя с ним.
@@ -319,9 +322,11 @@ function updateConfigPath() {
 
 function readUpdateConfig() {
   try {
-    return JSON.parse(fs.readFileSync(updateConfigPath(), 'utf-8'));
+    const cfg = JSON.parse(fs.readFileSync(updateConfigPath(), 'utf-8'));
+    if (!cfg.url) cfg.url = DEFAULT_UPDATE_URL;
+    return cfg;
   } catch (_) {
-    return { url: '', auto: true };
+    return { url: DEFAULT_UPDATE_URL, auto: true };
   }
 }
 
