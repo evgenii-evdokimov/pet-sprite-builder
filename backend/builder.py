@@ -997,11 +997,17 @@ def zip_folder(folder):
     return {"path": zip_path, "sizeBytes": os.path.getsize(zip_path)}
 
 
+def default_out_dir():
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return os.path.join(base, "PetSpriteBuilder", "bundles")
+
+
 def list_bundles(payload):
     roots = []
     od = payload.get("outDir")
     if od:
         roots.append(od)
+    roots.append(default_out_dir())
     roots.append(os.path.join(os.path.expanduser("~"), "PetSpriteBuilder"))
     seen = set()
     result = []
@@ -1034,7 +1040,7 @@ def build_gif_pet(payload):
     fw = int(payload.get("frameWidth") or 384)
     fh = int(payload.get("frameHeight") or 416)
     label = (payload.get("label") or "My Pet").strip()
-    out_dir = payload.get("outDir") or os.path.join(os.path.expanduser("~"), "PetSpriteBuilder")
+    out_dir = payload.get("outDir") or default_out_dir()
     remove_bg = bool(payload.get("removeBg"))
     bg = payload.get("bg") or {}
 
@@ -1193,7 +1199,7 @@ def run(payload):
         }
 
     if not out_dir:
-        out_dir = os.path.join(os.path.expanduser("~"), "PetSpriteBuilder")
+        out_dir = default_out_dir()
     os.makedirs(out_dir, exist_ok=True)
 
     if action == "export-animation":
