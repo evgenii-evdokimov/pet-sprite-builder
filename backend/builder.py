@@ -617,6 +617,33 @@ def cutout_preview(path, bg):
     return {"original": orig, "cutout": cached}
 
 
+def source_thumb(path, size=180):
+    """Кэш маленькой превьюшки исходника: карточки не должны декодировать 76-МБ GIF."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = hashlib.sha256(
+        f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}|{size}".encode("utf-8")
+    ).hexdigest()[:24]
+    out = os.path.join(preview_dir(), f"thumb-{key}.png")
+    if os.path.exists(out):
+        return out
+    try:
+        im = Image.open(path)
+        try:
+            im.seek(0)
+        except Exception:
+            pass
+        im = im.convert("RGBA")
+        im.thumbnail((size, size), Image.LANCZOS)
+        im.save(out, "PNG", optimize=True)
+        return out
+    except Exception as e:
+        log(f"thumb {path}: {e!r}")
+        return None
+
+
 def list_pets(payload):
     db_path = payload.get("dbPath") or DEFAULT_DB
     pet_root = payload.get("petRoot") or DEFAULT_PET_ROOT
@@ -683,6 +710,7 @@ def list_pets(payload):
                             "name": row_names.get(r, f"row {r}"),
                             "path": v,
                             "exists": os.path.exists(v),
+                            "thumb": source_thumb(v) if os.path.exists(v) else None,
                         }
                     )
                 fw = src.get("frameWidth") or fw

@@ -11,6 +11,7 @@ const ANIMS = [
 ];
 
 const CHANGELOG = [
+  { version: '1.1.6', notes: ['Питомцы открываются быстро: миниатюры фото кэшируются', 'Список питомцев показывается из кэша сразу', 'Запуск напрямую из ярлыка без PyInstaller-лаунчера'] },
   { version: '1.1.4', notes: ['Инструменты под шестерёнкой', 'Убран URL манифеста из UI', 'Только русские подписи в карточках'] },
   { version: '1.1.3', notes: ['URL автообновления по умолчанию', 'Мелкие правки'] },
   { version: '1.1.2', notes: ['Удалён portable-режим', 'Автообновление и экран «Что нового»', 'Экспорт диагностического лога'] },
@@ -995,11 +996,37 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
+const PETS_CACHE_KEY = 'psb.petsCacheV1';
+
+function readPetsCache() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PETS_CACHE_KEY) || '[]');
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function writePetsCache(list) {
+  try {
+    localStorage.setItem(PETS_CACHE_KEY, JSON.stringify(list.slice(0, 100)));
+  } catch (_) {}
+}
+
 async function loadPets() {
   const grid = document.getElementById('petsGrid');
   const empty = document.getElementById('petsEmpty');
-  grid.innerHTML = '<div class="no-sources">Загрузка…</div>';
   empty.classList.add('hidden');
+
+  if (!petsCache.length) {
+    const stored = readPetsCache();
+    if (stored.length) {
+      petsCache = stored;
+      renderPetsFiltered();
+    } else {
+      grid.innerHTML = '<div class="no-sources">Загрузка…</div>';
+    }
+  }
 
   const resp = await window.api.listPets();
   grid.innerHTML = '';
@@ -1010,6 +1037,7 @@ async function loadPets() {
   }
   const res = resp.result || {};
   petsCache = res.pets || [];
+  writePetsCache(petsCache);
   renderPetsFiltered();
 }
 
@@ -1045,10 +1073,10 @@ function renderPetCard(pet) {
   const sourcesHtml = pet.sources.length
     ? pet.sources
         .map((s) => {
-          const src = s.exists ? toFileUrl(s.path) : '';
+          const src = s.exists ? toFileUrl(s.thumb || s.path) : '';
           return `
             <div class="source ${s.exists ? '' : 'missing'}" title="${escapeHtml(s.path)}">
-              ${src ? `<img src="${src}" alt="" />` : '<img alt="" />'}
+              ${src ? `<img src="${src}" alt="" loading="lazy" decoding="async" />` : '<img alt="" />'}
               <div class="s-name">${escapeHtml(s.name)}</div>
             </div>`;
         })
@@ -1057,7 +1085,7 @@ function renderPetCard(pet) {
 
   card.innerHTML = `
     <div class="pet-card-top">
-      ${preview ? `<img class="pet-preview" src="${preview}" alt="" />` : '<div class="pet-preview"></div>'}
+      ${preview ? `<img class="pet-preview" src="${preview}" alt="" loading="lazy" decoding="async" />` : '<div class="pet-preview"></div>'}
       <div>
         <div class="pet-label">
           ${escapeHtml(pet.label)}
