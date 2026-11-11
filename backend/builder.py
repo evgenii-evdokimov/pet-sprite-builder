@@ -207,6 +207,7 @@ def build_sheet(
             if flip:
                 gframes = [f.transpose(Image.FLIP_LEFT_RIGHT) for f in gframes]
             chroma = t.get("chroma") or (bg or {}).get("chroma")
+            row_t = time.time()
             anchor = t.get("anchor") or "bottom"
             rock = t.get("rock", True)
             crop = t.get("crop")
@@ -252,6 +253,7 @@ def build_sheet(
                 "frames": len(gframes),
                 "frameDurationsMs": gdurs,
             }
+            log(f"{name}: {len(gframes)} кадров, {round(time.time() - row_t, 1)} с")
             continue
 
         scale = float(t.get("scale") or 1.0)
@@ -269,6 +271,7 @@ def build_sheet(
             or rotate != 0
         )
         anchor = t.get("anchor") or "bottom"
+        row_t = time.time()
 
         crop = t.get("crop")
         key = (
@@ -325,6 +328,7 @@ def build_sheet(
             "frames": frames,
             "frameDurationsMs": anim_durations(name, anim_options, frames),
         }
+        log(f"{name}: готово за {round(time.time() - row_t, 1)} с")
 
     if not animations:
         raise RuntimeError(
@@ -794,29 +798,86 @@ def sample_indices(n, k):
     return sorted(set(round(i * (n - 1) / (k - 1)) for i in range(k)))
 
 
-def gif_frames_at(path, idxs):
+def gif_cache_dir():
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    d = os.path.join(base, "PetSpriteBuilder", "gifcache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def gif_cache_files(path, idx):
+    st = os.stat(path)
+    key = hashlib.sha256(
+        f"{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}|{idx}".encode("utf-8")
+    ).hexdigest()[:24]
+    d = gif_cache_dir()
+    return os.path.join(d, key + ".png"), os.path.join(d, key + ".json")
+
+
+def gif_cache_load(path, idx):
+    img_p, meta_p = gif_cache_files(path, idx)
+    if not (os.path.exists(img_p) and os.path.exists(meta_p)):
+        return None
+    try:
+        with open(meta_p, "r", encoding="utf-8") as f:
+            dur = int(json.load(f).get("duration") or 40)
+        return Image.open(img_p).convert("RGBA"), max(20, dur)
+    except Exception:
+        return None
+
+
+def gif_cache_save(path, idx, im, dur):
+    try:
+        img_p, meta_p = gif_cache_files(path, idx)
+        tmp = img_p + ".tmp"
+        im.save(tmp, "PNG")
+        os.replace(tmp, img_p)
+        with open(meta_p, "w", encoding="utf-8") as f:
+            json.dump({"duration": int(dur)}, f)
+    except Exception:
+        pass
+
+
+def gif_collect(path, idxs):
+    """Один проход по GIF вместо seek() на каждый кадр + кэш кадров на диск."""
     im = Image.open(path)
     n = getattr(im, "n_frames", 1) or 1
-    frames = []
-    durs = []
-    for idx in idxs:
-        idx = max(0, min(n - 1, int(idx)))
-        im.seek(idx)
-        frames.append(im.convert("RGBA").copy())
-        durs.append(max(20, int(im.info.get("duration") or 40)))
+    wanted = [max(0, min(n - 1, int(i))) for i in idxs]
+    found = {}
+    need = []
+    for idx in sorted(set(wanted)):
+        cached = gif_cache_load(path, idx)
+        if cached is not None:
+            found[idx] = cached
+        else:
+            need.append(idx)
+    if need:
+        target = set(need)
+        last = max(need)
+        for i in range(last + 1):
+            im.seek(i)
+            if i in target:
+                fr = im.convert("RGBA").copy()
+                dur = max(20, int(im.info.get("duration") or 40))
+                found[i] = (fr, dur)
+                gif_cache_save(path, i, fr, dur)
+                target.discard(i)
+                if not target:
+                    break
+    frames = [found[i][0] for i in wanted if i in found]
+    durs = [found[i][1] for i in wanted if i in found]
     return frames, durs
+
+
+def gif_frames_at(path, idxs):
+    return gif_collect(path, idxs)
 
 
 def gif_frames(path, maxn=COLS):
     im = Image.open(path)
     n = getattr(im, "n_frames", 1) or 1
     idxs = sample_indices(n, maxn)
-    frames = []
-    durs = []
-    for idx in idxs:
-        im.seek(idx)
-        frames.append(im.convert("RGBA").copy())
-        durs.append(max(20, int(im.info.get("duration") or 40)))
+    frames, durs = gif_collect(path, idxs)
 
     if n > maxn and frames:
         avg = sum(durs) / len(durs)

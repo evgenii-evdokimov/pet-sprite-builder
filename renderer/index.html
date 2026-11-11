@@ -294,24 +294,26 @@
       <details class="acc" open>
         <summary>Проект и сохранение</summary>
         <div class="acc-body">
-          <div class="field row">
+          <div class="field">
             <span>Проект</span>
-            <div class="btn-row">
-              <button id="saveProjectBtn" class="ghost small">Сохранить…</button>
-              <button id="openProjectBtn" class="ghost small">Открыть…</button>
-              <button id="importBundleBtn" class="ghost small">Bundle…</button>
-              <button id="gifStatesBtn" class="ghost small">GIF→bundle…</button>
+            <div class="btn-grid">
+              <button id="saveProjectBtn" class="ghost">Сохранить проект…</button>
+              <button id="openProjectBtn" class="ghost">Открыть проект…</button>
+              <button id="importBundleBtn" class="ghost">Открыть bundle…</button>
+              <button id="gifStatesBtn" class="ghost">Собрать из GIF…</button>
             </div>
           </div>
-          <label class="field row">
+          <div class="field">
             <span>Папка сохранения</span>
-            <button id="outBtn" class="ghost small">Выбрать…</button>
-          </label>
-          <div id="outPath" class="muted ellipsis">по умолчанию: ~/PetSpriteBuilder</div>
-          <div id="lastBundle" class="muted ellipsis"></div>
-          <button id="openBundleBtn" class="ghost small hidden">Открыть папку bundle</button>
-          <button id="zipBtn" class="ghost small hidden">Скачать ZIP</button>
-          <button id="bundlesBtn" class="ghost small">Bundle на диске…</button>
+            <button id="outBtn" class="ghost block">Выбрать папку…</button>
+          </div>
+          <div id="outPath" class="muted path-line">по умолчанию: ~/PetSpriteBuilder</div>
+          <div id="lastBundle" class="muted path-line"></div>
+          <div class="btn-row wide">
+            <button id="openBundleBtn" class="ghost hidden">Открыть папку bundle</button>
+            <button id="zipBtn" class="ghost hidden">Скачать ZIP</button>
+            <button id="bundlesBtn" class="ghost">Bundle на диске…</button>
+          </div>
           <label class="field">
             <span>Качество WebP</span>
             <select id="webpMode">

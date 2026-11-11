@@ -462,12 +462,11 @@ button.small { padding: 6px 10px; font-size: 12px; }
 }
 .acc > summary {
   cursor: pointer;
-  padding: 10px 12px;
+  padding: 12px 14px;
   font-weight: 600;
-  font-size: 12px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
+  font-size: 14px;
+  letter-spacing: 0.02em;
+  color: var(--text);
   list-style: none;
   display: flex;
   align-items: center;
@@ -693,4 +692,36 @@ input[type='color'] { width: 48px; height: 28px; padding: 0; border: 1px solid v
 .changelog h4 { margin: 10px 0 4px; font-size: 13px; }
 .changelog ul { margin: 0 0 8px 18px; padding: 0; }
 
-.tools-box { width: 640px; }
+.tools-box { width: 680px; }
+
+.btn-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+}
+.btn-grid button {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+button.block {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+.path-line {
+  word-break: break-all;
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+.btn-row.wide {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 10px;
+}
+.btn-row.wide button {
+  padding: 9px 12px;
+  font-size: 12.5px;
+  flex: 1 1 auto;
+}
