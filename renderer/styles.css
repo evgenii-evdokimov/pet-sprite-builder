@@ -692,3 +692,5 @@ input[type='color'] { width: 48px; height: 28px; padding: 0; border: 1px solid v
 .changelog { max-height: 50vh; overflow: auto; font-size: 12px; line-height: 1.55; }
 .changelog h4 { margin: 10px 0 4px; font-size: 13px; }
 .changelog ul { margin: 0 0 8px 18px; padding: 0; }
+
+.tools-box { width: 640px; }

@@ -199,7 +199,7 @@ function renderGifStates() {
     for (const a of ANIMS) {
       const o = document.createElement('option');
       o.value = a.key;
-      o.textContent = a.title;
+      o.textContent = a.hint;
       sel.appendChild(o);
     }
     sel.value = 'idle';
@@ -748,8 +748,7 @@ function renderCard(anim) {
   card.innerHTML = `
     <div class="card-head">
       <div>
-        <div class="card-title">${anim.title}</div>
-        <div class="card-sub">${anim.hint}</div>
+        <div class="card-title">${anim.hint}</div>
       </div>
       <div class="head-right">
         <label class="slot-toggle" title="Включить/выключить анимацию">
@@ -1259,7 +1258,7 @@ function renderStatesChecklist() {
     const row = document.createElement('div');
     row.className = 'states-row';
     const name = document.createElement('span');
-    name.textContent = a.title;
+    name.textContent = a.hint;
     if (off) name.className = 'st-off';
     const t1 = document.createElement('span');
     t1.textContent = type;
@@ -1312,7 +1311,7 @@ function openAdjust(row) {
   const opt = (anim && animOptions[anim.key]) || {};
   const animated = isAnimatedPath(paths[row]);
   document.getElementById('apAnimTitle').textContent =
-    (animated ? 'GIF: ' : 'Фото: ') + (anim ? anim.title : '');
+    (animated ? 'GIF: ' : 'Фото: ') + (anim ? anim.hint : '');
   document.getElementById('apStaticBlock').classList.toggle('hidden', animated);
   document.getElementById('apGifBlock').classList.toggle('hidden', !animated);
   setCropInputs(t.crop);
@@ -1781,7 +1780,6 @@ async function checkUpdates(silent) {
 
 async function initUpdates() {
   const cfg = await window.api.getUpdateConfig();
-  document.getElementById('updateUrl').value = cfg.url || '';
   document.getElementById('updateAuto').checked = cfg.auto !== false;
   if (cfg.auto !== false && cfg.url) checkUpdates(true);
 }
@@ -1874,6 +1872,8 @@ function init() {
   document.getElementById('zipBtn').addEventListener('click', zipBundle);
   document.getElementById('bundlesBtn').addEventListener('click', loadBundles);
   document.getElementById('refreshBundles').addEventListener('click', loadBundles);
+  document.getElementById('toolsBtn').addEventListener('click', () => document.getElementById('toolsModal').classList.remove('hidden'));
+  document.getElementById('toolsClose').addEventListener('click', () => document.getElementById('toolsModal').classList.add('hidden'));
   document.getElementById('exportLogBtn').addEventListener('click', exportDiagnosticLog);
   document.getElementById('checkUpdateBtn').addEventListener('click', () => checkUpdates(false));
   document.getElementById('whatsNewBtn').addEventListener('click', () => showWhatsNew());
@@ -1891,10 +1891,9 @@ function init() {
   });
   const saveUpdateCfg = () =>
     window.api.setUpdateConfig({
-      url: document.getElementById('updateUrl').value.trim(),
+      url: '',
       auto: document.getElementById('updateAuto').checked,
     });
-  document.getElementById('updateUrl').addEventListener('change', saveUpdateCfg);
   document.getElementById('updateAuto').addEventListener('change', saveUpdateCfg);
   document.getElementById('themeBtn').addEventListener('click', () => {
     const light = !document.body.classList.contains('light');
