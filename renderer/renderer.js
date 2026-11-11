@@ -65,7 +65,6 @@ let animOptions = {};
 let gifMap = {};
 let gifCandidates = [];
 let slotClipboard = null;
-const disabledAnims = new Set();
 
 function updatePasteButtons() {
   document.querySelectorAll('.slot-paste').forEach((b) => {
@@ -75,7 +74,7 @@ function updatePasteButtons() {
 const history = { states: [], idx: -1 };
 
 function hasBuildable() {
-  return ANIMS.some((a) => !disabledAnims.has(a.key) && paths[a.row]);
+  return ANIMS.some((a) => paths[a.row]);
 }
 
 function hexToRgb(hex) {
@@ -130,13 +129,6 @@ function baseDurations(anim) {
 
 function isAnimatedPath(p) {
   return /\.(gif|apng)$/i.test(p || '');
-}
-
-function applyTheme() {
-  const light = localStorage.getItem('psb.theme') === 'light';
-  document.body.classList.toggle('light', light);
-  const b = document.getElementById('themeBtn');
-  if (b) b.textContent = light ? '🌙' : '☀';
 }
 
 function renderAnimOptions() {
@@ -427,9 +419,6 @@ function restoreSnapshot(proj) {
   }
   animOptions = proj.animOptions ? JSON.parse(JSON.stringify(proj.animOptions)) : {};
   renderAnimOptions();
-  disabledAnims.clear();
-  for (const k of proj.disabled || []) disabledAnims.add(k);
-  for (const anim of ANIMS) if (cardByRow[anim.row].syncDisabled) cardByRow[anim.row].syncDisabled();
   document.getElementById('webpMode').value = proj.webpMode || 'lossless';
   for (const anim of ANIMS) cardByRow[anim.row].updateTune();
   applyingProject = false;
@@ -613,7 +602,7 @@ function currentProject() {
     consistentScale: document.getElementById('consistent').checked,
     bg: gatherBg(),
     animOptions: JSON.parse(JSON.stringify(animOptions)),
-    disabled: Array.from(disabledAnims),
+    disabled: [],
     webpMode: document.getElementById('webpMode').value,
     outDir: outDir || '',
   };
@@ -652,9 +641,6 @@ async function applyProject(project, opts) {
   }
   animOptions = project.animOptions ? JSON.parse(JSON.stringify(project.animOptions)) : {};
   renderAnimOptions();
-  disabledAnims.clear();
-  for (const k of project.disabled || []) disabledAnims.add(k);
-  for (const anim of ANIMS) if (cardByRow[anim.row].syncDisabled) cardByRow[anim.row].syncDisabled();
   document.getElementById('webpMode').value = project.webpMode || 'lossless';
   outDir = project.outDir || null;
   if (outDir) {
@@ -773,9 +759,6 @@ function renderCard(anim) {
         <div class="card-title">${anim.hint}</div>
       </div>
       <div class="head-right">
-        <label class="slot-toggle" title="Включить/выключить анимацию">
-          <input class="slot-on" type="checkbox" checked />
-        </label>
         <button class="slot-copy ghost small" title="Скопировать слот">⧉</button>
         <button class="slot-paste ghost small hidden" title="Вставить слот">⎘</button>
         <div class="badge">${anim.frames} кадр.</div>
@@ -800,26 +783,6 @@ function renderCard(anim) {
   const tuneBtn = card.querySelector('.tune');
   const pasteBtn = card.querySelector('.paste');
   const clearBtn = card.querySelector('.clear');
-  const slotOn = card.querySelector('.slot-on');
-  thumb.draggable = false;
-
-  const syncDisabled = () => {
-    const off = disabledAnims.has(anim.key);
-    if (slotOn) slotOn.checked = !off;
-    card.classList.toggle('disabled', off);
-  };
-  card.syncDisabled = syncDisabled;
-  syncDisabled();
-  if (slotOn) {
-    slotOn.addEventListener('click', (e) => e.stopPropagation());
-    slotOn.addEventListener('change', () => {
-      if (slotOn.checked) disabledAnims.delete(anim.key);
-      else disabledAnims.add(anim.key);
-      syncDisabled();
-      scheduleDraft();
-      commitHistory();
-    });
-  }
 
   const copySlotBtn = card.querySelector('.slot-copy');
   const pasteSlotBtn = card.querySelector('.slot-paste');
@@ -1310,7 +1273,6 @@ function renderStatesChecklist() {
   if (!el) return;
   el.innerHTML = '';
   for (const a of ANIMS) {
-    const off = disabledAnims.has(a.key);
     const p = paths[a.row];
     const opt = animOptions[a.key] || {};
     const type = !p ? '—' : isAnimatedPath(p) ? 'GIF' : 'фото';
@@ -1321,11 +1283,10 @@ function renderStatesChecklist() {
     row.className = 'states-row';
     const name = document.createElement('span');
     name.textContent = a.hint;
-    if (off) name.className = 'st-off';
     const t1 = document.createElement('span');
     t1.textContent = type;
     const t2 = document.createElement('span');
-    t2.textContent = off ? 'выкл' : info || '';
+    t2.textContent = info || '';
     row.appendChild(name);
     row.appendChild(t1);
     row.appendChild(t2);
@@ -1563,7 +1524,7 @@ function gatherPayload() {
     consistentScale: document.getElementById('consistent').checked,
     bg: gatherBg(),
     animOptions: JSON.parse(JSON.stringify(animOptions)),
-    disabled: Array.from(disabledAnims),
+    disabled: [],
     webpLossless: document.getElementById('webpMode').value === 'lossless',
     webpQuality:
       document.getElementById('webpMode').value === 'lossless'
@@ -1707,7 +1668,6 @@ function fillFromIdle() {
   }
   let n = 0;
   for (const a of ANIMS) {
-    if (disabledAnims.has(a.key)) continue;
     if (!paths[a.row]) {
       cardByRow[a.row].setPath(src);
       n++;
@@ -1977,12 +1937,6 @@ function init() {
       auto: document.getElementById('updateAuto').checked,
     });
   document.getElementById('updateAuto').addEventListener('change', saveUpdateCfg);
-  document.getElementById('themeBtn').addEventListener('click', () => {
-    const light = !document.body.classList.contains('light');
-    localStorage.setItem('psb.theme', light ? 'light' : 'dark');
-    applyTheme();
-  });
-  applyTheme();
   renderAnimOptions();
   document.getElementById('openProjectBtn').addEventListener('click', async () => {
     const r = await window.api.openProject();
@@ -2091,9 +2045,6 @@ function init() {
     const key = animKeyForRow(adjustRow);
     if (key) {
       delete animOptions[key];
-      disabledAnims.delete(key);
-      const a = ANIMS.find((x) => x.key === key);
-      if (a && cardByRow[a.row] && cardByRow[a.row].syncDisabled) cardByRow[a.row].syncDisabled();
     }
     updateAdjustPreview();
   });
