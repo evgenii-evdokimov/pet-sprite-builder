@@ -2009,6 +2009,14 @@ function init() {
   });
 
   window.api.onLog(appendLog);
+  window.api.onCutoutLog((line) => {
+    appendLog(line);
+    const modal = document.getElementById('cutoutModal');
+    if (modal && !modal.classList.contains('hidden')) {
+      const st = document.getElementById('cutoutStatus');
+      if (st) st.textContent = line;
+    }
+  });
 
   document.getElementById('buildBtn').addEventListener('click', build);
   document.getElementById('previewBtn').addEventListener('click', openPreview);

@@ -620,6 +620,7 @@ def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, an
 
 
 def cutout_preview(path, bg):
+    t0 = time.time()
     bg = bg or {}
     model = bg.get("model") or ""
     alpha = bool(bg.get("alphaMatting"))
@@ -627,15 +628,27 @@ def cutout_preview(path, bg):
     bgt = int(bg.get("bgThreshold") or 10)
     erode = int(bg.get("erode") or 10)
     pdir = preview_dir()
+    log(f"Вырезание: {os.path.basename(path)}")
+    log(
+        f"Модель: {model or 'default'}, alpha matting: {'вкл' if alpha else 'выкл'}, "
+        f"порог объекта: {fg}, порог фона: {bgt}, erode: {erode}"
+    )
     orig = os.path.join(pdir, f"orig-{uuid.uuid4().hex}.png")
     Image.open(path).convert("RGBA").save(orig, "PNG")
+    log(f"Оригинал сохранён за {round(time.time() - t0, 2)} с")
 
     extra = f"{model or 'default'}|{int(alpha)}|{fg}|{bgt}|{erode}"
     cached = cutout_cache_path(path, extra)
-    if not os.path.exists(cached):
+    if os.path.exists(cached):
+        log(f"Кэш найден: {os.path.basename(cached)} ({round(time.time() - t0, 2)} с)")
+    else:
+        log("Кэш не найден — запускаю rembg…")
         from rembg import new_session, remove
 
+        ts = time.time()
         session = new_session() if not model else new_session(model)
+        log(f"Модель загружена за {round(time.time() - ts, 1)} с")
+        ts = time.time()
         res = remove(
             Image.open(path).convert("RGBA"),
             session=session,
@@ -644,10 +657,13 @@ def cutout_preview(path, bg):
             alpha_matting_background_threshold=bgt,
             alpha_matting_erode_size=erode,
         )
+        log(f"Удаление фона готово за {round(time.time() - ts, 1)} с")
         try:
             res.save(cached, "PNG")
-        except Exception:
-            pass
+            log(f"Результат сохранён в кэш: {os.path.basename(cached)}")
+        except Exception as e:
+            log(f"Не удалось сохранить кэш: {e!r}")
+    log(f"Сравнение готово за {round(time.time() - t0, 2)} с")
     return {"original": orig, "cutout": cached}
 
 

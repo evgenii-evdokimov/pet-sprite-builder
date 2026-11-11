@@ -92,9 +92,12 @@
             <input id="bgAlpha" type="checkbox" />
             <span>Alpha matting (края аккуратнее, но медленнее)</span>
           </label>
-          <label class="field"><span>Порог переднего плана</span><input id="bgFg" type="number" min="1" max="255" value="240" /></label>
-          <label class="field"><span>Порог фона</span><input id="bgBg" type="number" min="1" max="255" value="10" /></label>
-          <label class="field"><span>Erode (сжатие края)</span><input id="bgErode" type="number" min="1" max="100" value="10" /></label>
+          <label class="field"><span>Порог переднего плана</span><input id="bgFg" type="number" min="1" max="255" value="240" title="Насколько уверенно пиксель должен быть похож на объект, чтобы остаться" /></label>
+          <div class="hint field-hint">Пиксели, которые rembg уверенно считает объектом. Больше значение — строже, меньше — больше деталей попадёт в питомца.</div>
+          <label class="field"><span>Порог фона</span><input id="bgBg" type="number" min="1" max="255" value="10" title="Насколько уверенно пиксель должен быть похож на фон, чтобы его убрали" /></label>
+          <div class="hint field-hint">Пиксели, которые считаются фоном. Меньше значение — фон удаляется агрессивнее.</div>
+          <label class="field"><span>Erode (сжатие края)</span><input id="bgErode" type="number" min="1" max="100" value="10" title="Сжатие маски по краю, чтобы убрать светлый ореол" /></label>
+          <div class="hint field-hint">Насколько сжать маску по краю. Больше — убирает светлый ореол от фона вокруг питомца.</div>
           <label class="check">
             <input id="chromaOn" type="checkbox" />
             <span>Хромакей: убрать однотонный фон (GIF/WebP)</span>

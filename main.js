@@ -232,7 +232,7 @@ ipcMain.handle('clear-cutouts', async () => {
 
 ipcMain.handle('cutout-preview', async (event, payload) => {
   return runBackend({ ...payload, action: 'cutout-preview' }, (line) =>
-    event.sender.send('build-log', line)
+    event.sender.send('cutout-log', line)
   );
 });
 

@@ -40,4 +40,5 @@ contextBridge.exposeInMainWorld('api', {
     }
   },
   onLog: (cb) => ipcRenderer.on('build-log', (_e, line) => cb(line)),
+  onCutoutLog: (cb) => ipcRenderer.on('cutout-log', (_e, line) => cb(line)),
 });
