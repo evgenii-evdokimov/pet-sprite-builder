@@ -27,12 +27,6 @@
         "to": "backend"
       }
     ],
-    "extraFiles": [
-      {
-        "from": "build/launcher-dist/Start Pet Sprite Builder.exe",
-        "to": "Start Pet Sprite Builder.exe"
-      }
-    ],
     "win": {
       "target": "nsis",
       "icon": "build/icon.ico"

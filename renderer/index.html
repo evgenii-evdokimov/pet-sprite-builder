@@ -113,44 +113,6 @@
       </details>
 
       <details class="acc" open>
-        <summary>Проект и сохранение</summary>
-        <div class="acc-body">
-          <div class="field row">
-            <span>Проект</span>
-            <div class="btn-row">
-              <button id="saveProjectBtn" class="ghost small">Сохранить…</button>
-              <button id="openProjectBtn" class="ghost small">Открыть…</button>
-              <button id="importBundleBtn" class="ghost small">Bundle…</button>
-              <button id="gifStatesBtn" class="ghost small">GIF→bundle…</button>
-            </div>
-          </div>
-          <label class="field row">
-            <span>Папка сохранения</span>
-            <button id="outBtn" class="ghost small">Выбрать…</button>
-          </label>
-          <div id="outPath" class="muted ellipsis">по умолчанию: ~/PetSpriteBuilder</div>
-          <div id="lastBundle" class="muted ellipsis"></div>
-          <button id="openBundleBtn" class="ghost small hidden">Открыть папку bundle</button>
-          <button id="zipBtn" class="ghost small hidden">Скачать ZIP</button>
-          <button id="bundlesBtn" class="ghost small">Bundle на диске…</button>
-          <label class="field">
-            <span>Качество WebP</span>
-            <select id="webpMode">
-              <option value="lossless">Lossless (макс. качество)</option>
-              <option value="95">Quality 95</option>
-              <option value="90">Quality 90</option>
-              <option value="80">Quality 80 (меньше файл)</option>
-            </select>
-          </label>
-          <div class="hint">
-            Приложение не меняет базу Orca. Импорт: правый клик по питомцу в строке
-            состояния Orca → «Импортировать пакет .codex-pet…» → выбери папку-bundle
-            (<code>pet.json</code> + спрайт), затем <b>полностью перезапусти Orca</b>.
-          </div>
-        </div>
-      </details>
-
-      <details class="acc" open>
         <summary>Недавние фото</summary>
         <div class="acc-body">
           <div id="recentGrid" class="recent-grid">
@@ -326,7 +288,47 @@
 
   <div id="toolsModal" class="modal hidden">
     <div class="modal-box tools-box">
-      <div class="pv-head"><h3>Инструменты</h3><button id="toolsClose" class="ghost small">Закрыть</button></div>
+      <div class="pv-head"><h3>Настройки</h3><button id="toolsClose" class="ghost small">Закрыть</button></div>
+
+      <details class="acc" open>
+        <summary>Проект и сохранение</summary>
+        <div class="acc-body">
+          <div class="field row">
+            <span>Проект</span>
+            <div class="btn-row">
+              <button id="saveProjectBtn" class="ghost small">Сохранить…</button>
+              <button id="openProjectBtn" class="ghost small">Открыть…</button>
+              <button id="importBundleBtn" class="ghost small">Bundle…</button>
+              <button id="gifStatesBtn" class="ghost small">GIF→bundle…</button>
+            </div>
+          </div>
+          <label class="field row">
+            <span>Папка сохранения</span>
+            <button id="outBtn" class="ghost small">Выбрать…</button>
+          </label>
+          <div id="outPath" class="muted ellipsis">по умолчанию: ~/PetSpriteBuilder</div>
+          <div id="lastBundle" class="muted ellipsis"></div>
+          <button id="openBundleBtn" class="ghost small hidden">Открыть папку bundle</button>
+          <button id="zipBtn" class="ghost small hidden">Скачать ZIP</button>
+          <button id="bundlesBtn" class="ghost small">Bundle на диске…</button>
+          <label class="field">
+            <span>Качество WebP</span>
+            <select id="webpMode">
+              <option value="lossless">Lossless (макс. качество)</option>
+              <option value="95">Quality 95</option>
+              <option value="90">Quality 90</option>
+              <option value="80">Quality 80 (меньше файл)</option>
+            </select>
+          </label>
+          <div class="hint">
+            Приложение не меняет базу Orca. Импорт: правый клик по питомцу в строке
+            состояния Orca → «Импортировать пакет .codex-pet…» → выбери папку-bundle
+            (<code>pet.json</code> + спрайт), затем <b>полностью перезапусти Orca</b>.
+          </div>
+        </div>
+      </details>
+
+
 
       <details class="acc" open>
         <summary>Bundle на диске</summary>
