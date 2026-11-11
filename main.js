@@ -7,9 +7,6 @@ const { spawn } = require('child_process');
 const DEFAULT_UPDATE_URL =
   'https://evgenii-evdokimov.github.io/pet-sprite-builder/latest.json';
 
-// На части систем Chromium-песочница падает с STATUS_BREAKPOINT (0x80000003)
-// ещё до старта окна. `appendSwitch` тут не помогает — флаг должен быть в
-// командной строке, поэтому при отсутствии флага перезапускаем себя с ним.
 function appTempDir() {
   const d = path.join(app.getPath('userData'), 'tmp');
   try {
@@ -23,11 +20,6 @@ if (process.env.PSB_DEBUG) {
     fs.writeFileSync(path.join(appTempDir(), 'psb_main_ran.txt'), String(Date.now()));
   } catch (_) {}
 }
-if (!process.argv.includes('--no-sandbox')) {
-  app.relaunch({ args: process.argv.slice(1).concat('--no-sandbox') });
-  app.exit(0);
-}
-
 let win = null;
 
 function createWindow() {
