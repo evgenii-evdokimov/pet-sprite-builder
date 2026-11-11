@@ -89,7 +89,7 @@ def cutout_cache_path(path, extra=""):
     return os.path.join(d, key + ".png")
 
 
-def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=None, bg=None, rotate=0, crop=None):
+def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=None, bg=None, rotate=0, crop=None, stretch_x=1.0, stretch_y=1.0):
     bg = bg or {}
     model = bg.get("model") or ""
     alpha = bool(bg.get("alphaMatting"))
@@ -137,6 +137,11 @@ def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=Non
     if abs(scale - 1.0) > 1e-3:
         im = im.resize(
             (max(1, int(im.width * scale)), max(1, int(im.height * scale))),
+            Image.LANCZOS,
+        )
+    if abs(stretch_x - 1.0) > 1e-3 or abs(stretch_y - 1.0) > 1e-3:
+        im = im.resize(
+            (max(1, int(im.width * stretch_x)), max(1, int(im.height * stretch_y))),
             Image.LANCZOS,
         )
     r, g, b, a = im.split()
@@ -206,6 +211,8 @@ def build_sheet(
             rock = t.get("rock", True)
             crop = t.get("crop")
             gscale = float(t.get("scale") or 1.0)
+            gsx = float(t.get("stretchX") or 1.0)
+            gsy = float(t.get("stretchY") or 1.0)
             gtx = float(t.get("dx") or 0.0) * frame_w
             gty = float(t.get("dy") or 0.0) * frame_h
             total = max(1, len(gframes))
@@ -215,9 +222,12 @@ def build_sheet(
                     frame_w,
                     frame_h,
                 )
-                if abs(gscale - 1.0) > 1e-3:
+                if abs(gscale - 1.0) > 1e-3 or abs(gsx - 1.0) > 1e-3 or abs(gsy - 1.0) > 1e-3:
                     fr2 = fr2.resize(
-                        (max(1, int(fr2.width * gscale)), max(1, int(fr2.height * gscale))),
+                        (
+                            max(1, int(fr2.width * gscale * gsx)),
+                            max(1, int(fr2.height * gscale * gsy)),
+                        ),
                         Image.LANCZOS,
                     )
                 bob = 0
@@ -245,11 +255,15 @@ def build_sheet(
             continue
 
         scale = float(t.get("scale") or 1.0)
+        stretch_x = float(t.get("stretchX") or 1.0)
+        stretch_y = float(t.get("stretchY") or 1.0)
         rotate = int(t.get("rotate") or 0) % 360
         tx = float(t.get("dx") or 0.0) * frame_w
         ty = float(t.get("dy") or 0.0) * frame_h
         manual = (
             abs(scale - 1.0) > 1e-3
+            or abs(stretch_x - 1.0) > 1e-3
+            or abs(stretch_y - 1.0) > 1e-3
             or abs(tx) > 0.5
             or abs(ty) > 0.5
             or rotate != 0
@@ -262,6 +276,8 @@ def build_sheet(
             flip,
             consistent,
             round(scale, 3),
+            round(stretch_x, 3),
+            round(stretch_y, 3),
             rotate,
             (bg or {}).get("model"),
             bool((bg or {}).get("alphaMatting")),
@@ -271,7 +287,7 @@ def build_sheet(
             str(crop),
         )
         if key not in cache:
-            im = prepare(p, frame_w, frame_h, consistent, scale, session_box, bg, rotate, crop)
+            im = prepare(p, frame_w, frame_h, consistent, scale, session_box, bg, rotate, crop, stretch_x, stretch_y)
             if flip:
                 im = im.transpose(Image.FLIP_LEFT_RIGHT)
             cache[key] = im

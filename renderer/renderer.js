@@ -11,6 +11,7 @@ const ANIMS = [
 ];
 
 const CHANGELOG = [
+  { version: '1.2.0', notes: ['Фото растягивается по ширине/высоте за боковые края и свободно за углы', 'Подсказка, зачем нужны длительности кадров'] },
   { version: '1.1.9', notes: ['Фото можно масштабировать, потянув за края или углы в настройке', 'Привязка (низ/центр/верх) теперь видна в предпросмотре', 'Масштаб и сдвиг работают и для GIF'] },
   { version: '1.1.8', notes: ['Служебные файлы больше не пишутся в системный TEMP (EPERM)', 'Питомцы, модели фона и вставка из буфера снова работают'] },
   { version: '1.1.7', notes: ['Питомцы: таймаут и кнопка «Повторить» вместо вечной загрузки', 'Ошибки бэкенда пишутся в лог и попадают в диагностику'] },
@@ -46,6 +47,8 @@ let adjustRow = null;
 let adjustRotate = 0;
 let adjustDx = 0;
 let adjustDy = 0;
+let adjustSX = 1;
+let adjustSY = 1;
 const adjustAnim = { raf: 0, t0: 0, phase: 0 };
 let pv = null;
 let petsCache = [];
@@ -720,6 +723,8 @@ function isDefaultTransform(t) {
   if (!t) return true;
   return (
     Math.abs((t.scale || 1) - 1) < 0.005 &&
+    Math.abs((t.stretchX || 1) - 1) < 0.005 &&
+    Math.abs((t.stretchY || 1) - 1) < 0.005 &&
     Math.abs(t.dx || 0) < 0.005 &&
     Math.abs(t.dy || 0) < 0.005 &&
     ((t.rotate || 0) % 360) === 0 &&
@@ -1349,6 +1354,8 @@ function openAdjust(row) {
   document.getElementById('apFlip').checked = !!t.flip;
   adjustDx = t.dx || 0;
   adjustDy = t.dy || 0;
+  adjustSX = t.stretchX || 1;
+  adjustSY = t.stretchY || 1;
   adjustRotate = ((t.rotate || 0) % 360 + 360) % 360;
   document.getElementById('apRotateVal').textContent = adjustRotate + '°';
 
@@ -1430,23 +1437,25 @@ function updateAdjustPreview() {
 
   const anchor = document.getElementById('apAnchor').value;
   const shift = adjustDy * H + bob;
+  const sx = scale * adjustSX;
+  const sy = scale * adjustSY;
   const flip = document.getElementById('apFlip').checked ? 'scaleX(-1)' : '';
   img.style.left = `calc(50% + ${adjustDx * W}px)`;
   if (anchor === 'top') {
     img.style.bottom = 'auto';
     img.style.top = '2px';
     img.style.transformOrigin = 'top center';
-    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   } else if (anchor === 'center') {
     img.style.bottom = 'auto';
     img.style.top = '50%';
     img.style.transformOrigin = 'center center';
-    img.style.transform = `translateX(-50%) translateY(calc(-50% + ${shift}px)) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+    img.style.transform = `translateX(-50%) translateY(calc(-50% + ${shift}px)) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   } else {
     img.style.top = 'auto';
     img.style.bottom = '2px';
     img.style.transformOrigin = 'bottom center';
-    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   }
 }
 
@@ -1479,6 +1488,8 @@ function saveAdjust() {
     scale: parseInt(document.getElementById('apScale').value, 10) / 100,
     dx: adjustDx,
     dy: adjustDy,
+    stretchX: adjustSX,
+    stretchY: adjustSY,
     rotate: adjustRotate,
     flip: document.getElementById('apFlip').checked,
     still: !document.getElementById('apStill').checked,
@@ -2044,6 +2055,8 @@ function init() {
     document.getElementById('apScale').value = 100;
     adjustDx = 0;
     adjustDy = 0;
+    adjustSX = 1;
+    adjustSY = 1;
     document.getElementById('apFlip').checked = false;
     adjustRotate = 0;
     document.getElementById('apRotateVal').textContent = '0°';
@@ -2131,17 +2144,6 @@ function init() {
     return 'ns-resize';
   }
 
-  function anchorPivot() {
-    const img = document.getElementById('apImg');
-    const r = img.getBoundingClientRect();
-    const anchor = document.getElementById('apAnchor').value;
-    const x = r.left + r.width / 2;
-    let y = r.bottom;
-    if (anchor === 'top') y = r.top;
-    else if (anchor === 'center') y = r.top + r.height / 2;
-    return { x, y };
-  }
-
   apFrame.addEventListener('pointerdown', (e) => {
     if (!adjustRow && adjustRow !== 0) return;
     e.preventDefault();
@@ -2150,13 +2152,17 @@ function init() {
     } catch (_) {}
     const edges = resizeEdgesAt(e);
     if (edges) {
-      const pivot = anchorPivot();
-      const d0 = Math.max(8, Math.hypot(e.clientX - pivot.x, e.clientY - pivot.y));
+      const img = document.getElementById('apImg');
+      const r = img.getBoundingClientRect();
       apDrag = {
         mode: 'resize',
-        pivot,
-        d0,
-        scale0: parseFloat(apScaleEl.value) / 100,
+        edges,
+        x: e.clientX,
+        y: e.clientY,
+        w0: Math.max(8, r.width),
+        h0: Math.max(8, r.height),
+        sx0: adjustSX,
+        sy0: adjustSY,
       };
       apFrame.style.cursor = resizeCursor(edges);
     } else {
@@ -2172,9 +2178,20 @@ function init() {
       return;
     }
     if (apDrag.mode === 'resize') {
-      const d = Math.max(8, Math.hypot(e.clientX - apDrag.pivot.x, e.clientY - apDrag.pivot.y));
-      const scale = Math.min(4, Math.max(0.1, apDrag.scale0 * (d / apDrag.d0)));
-      apScaleEl.value = Math.round(scale * 100);
+      const dx = e.clientX - apDrag.x;
+      const dy = e.clientY - apDrag.y;
+      const dxEff = apDrag.edges.r ? dx : apDrag.edges.l ? -dx : dx;
+      const dyEff = apDrag.edges.b ? dy : apDrag.edges.t ? -dy : dy;
+      const canX = apDrag.edges.l || apDrag.edges.r;
+      const canY = apDrag.edges.t || apDrag.edges.b;
+      if (canX) {
+        const fx = 1 + (2 * dxEff) / apDrag.w0;
+        adjustSX = Math.min(5, Math.max(0.1, apDrag.sx0 * fx));
+      }
+      if (canY) {
+        const fy = 1 + dyEff / apDrag.h0;
+        adjustSY = Math.min(5, Math.max(0.1, apDrag.sy0 * fy));
+      }
       updateAdjustPreview();
       return;
     }
