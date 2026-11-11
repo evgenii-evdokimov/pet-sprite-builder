@@ -10,9 +10,17 @@ const DEFAULT_UPDATE_URL =
 // На части систем Chromium-песочница падает с STATUS_BREAKPOINT (0x80000003)
 // ещё до старта окна. `appendSwitch` тут не помогает — флаг должен быть в
 // командной строке, поэтому при отсутствии флага перезапускаем себя с ним.
+function appTempDir() {
+  const d = path.join(app.getPath('userData'), 'tmp');
+  try {
+    fs.mkdirSync(d, { recursive: true });
+  } catch (_) {}
+  return d;
+}
+
 if (process.env.PSB_DEBUG) {
   try {
-    fs.writeFileSync(path.join(os.tmpdir(), 'psb_main_ran.txt'), String(Date.now()));
+    fs.writeFileSync(path.join(appTempDir(), 'psb_main_ran.txt'), String(Date.now()));
   } catch (_) {}
 }
 if (!process.argv.includes('--no-sandbox')) {
@@ -85,7 +93,7 @@ ipcMain.handle('select-image', async () => {
 ipcMain.handle('paste-image', async () => {
   const img = clipboard.readImage();
   if (img.isEmpty()) return null;
-  const p = path.join(os.tmpdir(), `pet-paste-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  const p = path.join(appTempDir(), `pet-paste-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
   fs.writeFileSync(p, img.toPNG());
   return p;
 });
@@ -150,7 +158,7 @@ function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
 
     try {
       const { cmd, args } = backendCommand();
-      tmp = path.join(os.tmpdir(), `pet-payload-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+      tmp = path.join(appTempDir(), `pet-payload-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
       fs.writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
       backendLog(`action ${action} spawn ${cmd}`);
       child = spawn(cmd, [...args, '--payload', tmp], {
@@ -558,7 +566,7 @@ ipcMain.handle('check-update', async () => {
 ipcMain.handle('download-update', async (_e, url) => {
   if (!url) return { ok: false, error: 'Нет ссылки' };
   const ext = /\.exe$/i.test(url) ? '.exe' : '.bin';
-  const dest = path.join(os.tmpdir(), `PetSpriteBuilder-update-${Date.now()}${ext}`);
+  const dest = path.join(appTempDir(), `PetSpriteBuilder-update-${Date.now()}${ext}`);
 
   let lastErr = null;
   try {
