@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -373,6 +373,57 @@ function downloadFile(url, dest) {
   });
 }
 
+function errText(e) {
+  if (!e) return 'неизвестная ошибка';
+  if (e.code && e.message) return e.code + ': ' + e.message;
+  if (e.message) return e.message;
+  return String(e);
+}
+
+// Скачивание через Chromium-сеть Electron: уважает системный прокси и хранилище сертификатов.
+function downloadFileElectron(url, dest) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const fail = (e) => {
+      if (!finished) {
+        finished = true;
+        reject(e);
+      }
+    };
+    try {
+      const req = net.request({
+        url,
+        method: 'GET',
+        redirect: 'follow',
+        headers: { 'User-Agent': 'PetSpriteBuilder' },
+      });
+      req.on('response', (resp) => {
+        if (resp.statusCode >= 400) {
+          fail(new Error('HTTP ' + resp.statusCode));
+          return;
+        }
+        const out = fs.createWriteStream(dest);
+        resp.on('data', (chunk) => out.write(chunk));
+        resp.on('end', () => out.end());
+        out.on('finish', () => {
+          out.close(() => {
+            if (!finished) {
+              finished = true;
+              resolve(dest);
+            }
+          });
+        });
+        out.on('error', fail);
+        resp.on('error', fail);
+      });
+      req.on('error', fail);
+      req.end();
+    } catch (e) {
+      fail(e);
+    }
+  });
+}
+
 function cmpVersion(a, b) {
   const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
   const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
@@ -466,14 +517,47 @@ ipcMain.handle('check-update', async () => {
 
 ipcMain.handle('download-update', async (_e, url) => {
   if (!url) return { ok: false, error: 'Нет ссылки' };
+  const ext = /\.exe$/i.test(url) ? '.exe' : '.bin';
+  const dest = path.join(os.tmpdir(), `PetSpriteBuilder-update-${Date.now()}${ext}`);
+
+  let lastErr = null;
   try {
-    const ext = /\.exe$/i.test(url) ? '.exe' : '.bin';
-    const dest = path.join(os.tmpdir(), `PetSpriteBuilder-update-${Date.now()}${ext}`);
-    await downloadFile(url, dest);
-    await shell.openPath(dest);
+    await downloadFileElectron(url, dest);
+  } catch (e) {
+    lastErr = e;
+    try {
+      await downloadFile(url, dest);
+      lastErr = null;
+    } catch (e2) {
+      lastErr = e2;
+    }
+  }
+
+  if (lastErr) {
+    try {
+      await shell.openExternal(url);
+    } catch (_) {}
+    return {
+      ok: false,
+      error:
+        'Не удалось скачать (' +
+        errText(lastErr) +
+        '). Открыл ссылку в браузере — скачай установщик и запусти вручную.',
+    };
+  }
+
+  try {
+    const size = fs.statSync(dest).size;
+    if (size < 1000000) {
+      throw new Error('Файл слишком маленький (' + size + ' байт), похоже на ошибку');
+    }
+    const openErr = await shell.openPath(dest);
+    if (openErr) {
+      return { ok: false, error: 'Скачано, но не запустилось: ' + openErr, path: dest };
+    }
     return { ok: true, path: dest };
   } catch (e) {
-    return { ok: false, error: e.message };
+    return { ok: false, error: errText(e), path: dest };
   }
 });
 
