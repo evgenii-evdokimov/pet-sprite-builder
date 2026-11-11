@@ -1,0 +1,17 @@
+node_modules/
+dist/
+backend/dist/
+backend/build/
+backend/*.spec
+.tmp/
+*.log
+
+# Build artifacts / installers (upload to GitHub Releases, not git)
+*.exe
+*.zip
+*.blockmap
+
+__pycache__/
+build/launcher-build/
+build/launcher-dist/
+*.spec

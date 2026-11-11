@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' file: data:; style-src 'self' 'unsafe-inline'; script-src 'self'" />
+  <title>Pet Sprite Builder</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="progress" class="progress hidden"><div></div></div>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">🐾</div>
+      <div>
+        <h1>Pet Sprite Builder</h1>
+        <p>Собери питомца для Orca из своих фото</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <button id="themeBtn" class="ghost icon-btn" title="Тема">☀</button>
+      <button id="toggleSidebar" class="ghost icon-btn" title="Скрыть/показать настройки">☰</button>
+      <span id="slotCount" class="slot-count">0/9</span>
+      <button id="undoBtn" class="ghost icon-btn" title="Отменить (Ctrl+Z)">↶</button>
+      <button id="redoBtn" class="ghost icon-btn" title="Повторить (Ctrl+Y)">↷</button>
+      <button id="newPetBtn" class="ghost">Новый питомец</button>
+      <button id="copyBundleBtn" class="ghost icon-btn hidden" title="Скопировать путь к bundle">⧉</button>
+      <button id="previewBtn" class="ghost">Предпросмотр</button>
+      <button id="buildBtn" class="primary">Собрать</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="builder">Сборка</button>
+    <button class="tab" data-tab="pets">Питомцы</button>
+  </nav>
+
+  <main class="layout" id="panel-builder">
+    <section class="grid" id="grid"></section>
+
+    <aside class="sidebar">
+      <details class="acc" open>
+        <summary>Настройки</summary>
+        <div class="acc-body">
+          <label class="field">
+            <span>Ширина кадра</span>
+            <input id="frameW" type="number" min="16" value="384" />
+          </label>
+          <label class="field">
+            <span>Высота кадра</span>
+            <input id="frameH" type="number" min="16" value="416" />
+          </label>
+          <label class="field">
+            <span>Пресет размера</span>
+            <select id="framePreset">
+              <option value="192x208">192×208 (совместимый)</option>
+              <option value="256x278">256×278</option>
+              <option value="384x416" selected>384×416 (HQ)</option>
+              <option value="custom">Свой</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Имя питомца</span>
+            <input id="label" type="text" value="My Pet" />
+          </label>
+          <label class="field">
+            <span>ID (пусто — новый)</span>
+            <input id="petId" type="text" placeholder="auto" />
+          </label>
+          <label class="check">
+            <input id="consistent" type="checkbox" checked />
+            <span>Единый масштаб между позами</span>
+          </label>
+          <div class="hint">
+            Idle не обязателен: без него Orca покажет анимацию по умолчанию.
+            Выключить анимацию — галочка в карточке. Если running-left не задан,
+            он зеркалится из running-right.
+          </div>
+          <button id="fillIdleBtn" class="ghost small">Заполнить пустые из Idle</button>
+
+        </div>
+      </details>
+
+      <details class="acc" open>
+        <summary>Вырезание фона</summary>
+        <div class="acc-body">
+          <label class="field">
+            <span>Модель rembg</span>
+            <select id="bgModel"></select>
+          </label>
+          <label class="check">
+            <input id="bgAlpha" type="checkbox" />
+            <span>Alpha matting (края аккуратнее, но медленнее)</span>
+          </label>
+          <label class="field"><span>Порог переднего плана</span><input id="bgFg" type="number" min="1" max="255" value="240" /></label>
+          <label class="field"><span>Порог фона</span><input id="bgBg" type="number" min="1" max="255" value="10" /></label>
+          <label class="field"><span>Erode (сжатие края)</span><input id="bgErode" type="number" min="1" max="100" value="10" /></label>
+          <label class="check">
+            <input id="chromaOn" type="checkbox" />
+            <span>Хромакей: убрать однотонный фон (GIF/WebP)</span>
+          </label>
+          <label class="field row"><span>Цвет фона</span><input id="chromaColor" type="color" value="#ffffff" /></label>
+          <label class="field"><span>Допуск цвета</span><input id="chromaTol" type="number" min="1" max="255" value="30" /></label>
+          <div class="btn-row">
+            <button id="bgClearCache" class="ghost small">Очистить кэш</button>
+            <button id="bgCompareBtn" class="ghost small">Сравнить</button>
+          </div>
+          <div class="hint">
+            Показаны модели, уже скачанные в <code>~/.rembg</code>. «Сравнить» —
+            до/после для слота под курсором.
+          </div>
+        </div>
+      </details>
+
+      <details class="acc" open>
+        <summary>Проект и сохранение</summary>
+        <div class="acc-body">
+          <div class="field row">
+            <span>Проект</span>
+            <div class="btn-row">
+              <button id="saveProjectBtn" class="ghost small">Сохранить…</button>
+              <button id="openProjectBtn" class="ghost small">Открыть…</button>
+              <button id="importBundleBtn" class="ghost small">Bundle…</button>
+              <button id="gifStatesBtn" class="ghost small">GIF→bundle…</button>
+            </div>
+          </div>
+          <label class="field row">
+            <span>Папка сохранения</span>
+            <button id="outBtn" class="ghost small">Выбрать…</button>
+          </label>
+          <div id="outPath" class="muted ellipsis">по умолчанию: ~/PetSpriteBuilder</div>
+          <div id="lastBundle" class="muted ellipsis"></div>
+          <button id="openBundleBtn" class="ghost small hidden">Открыть папку bundle</button>
+          <button id="zipBtn" class="ghost small hidden">Скачать ZIP</button>
+          <button id="bundlesBtn" class="ghost small">Bundle на диске…</button>
+          <label class="field">
+            <span>Качество WebP</span>
+            <select id="webpMode">
+              <option value="lossless">Lossless (макс. качество)</option>
+              <option value="95">Quality 95</option>
+              <option value="90">Quality 90</option>
+              <option value="80">Quality 80 (меньше файл)</option>
+            </select>
+          </label>
+          <div class="hint">
+            Приложение не меняет базу Orca. Импорт: правый клик по питомцу в строке
+            состояния Orca → «Импортировать пакет .codex-pet…» → выбери папку-bundle
+            (<code>pet.json</code> + спрайт), затем <b>полностью перезапусти Orca</b>.
+          </div>
+        </div>
+      </details>
+
+      <details class="acc" open>
+        <summary>Недавние фото</summary>
+        <div class="acc-body">
+          <div id="recentGrid" class="recent-grid">
+            <div class="muted">Пока пусто</div>
+          </div>
+        </div>
+      </details>
+
+      <details class="acc">
+        <summary>Bundle на диске</summary>
+        <div class="acc-body">
+          <div id="bundleList" class="queue-list"><div class="muted">Нажми «Обновить»</div></div>
+          <button id="refreshBundles" class="ghost small">Обновить</button>
+        </div>
+      </details>
+
+      <details class="acc">
+        <summary>История проекта</summary>
+        <div class="acc-body">
+          <div id="historyList" class="queue-list"><div class="muted">Пока пусто</div></div>
+        </div>
+      </details>
+
+      <details class="acc">
+        <summary>Состояния</summary>
+        <div class="acc-body"><div id="statesList" class="states-list"></div></div>
+      </details>
+
+      <details class="acc">
+        <summary>Обновления</summary>
+        <div class="acc-body">
+          <label class="field"><span>URL манифеста обновлений (JSON)</span><input id="updateUrl" type="text" placeholder="https://.../latest.json" /></label>
+          <label class="check"><input id="updateAuto" type="checkbox" checked /><span>Проверять при запуске</span></label>
+          <div class="btn-row">
+            <button id="checkUpdateBtn" class="ghost small">Проверить</button>
+            <button id="downloadUpdateBtn" class="ghost small hidden">Скачать и запустить</button>
+            <button id="whatsNewBtn" class="ghost small">Что нового</button>
+          </div>
+          <div id="updateStatus" class="muted"></div>
+        </div>
+      </details>
+
+      <details class="acc" open>
+        <summary>Журнал</summary>
+        <div class="acc-body">
+          <pre id="log" class="log"></pre>
+          <button id="exportLogBtn" class="ghost small">Экспорт диагностического лога</button>
+        </div>
+      </details>
+    </aside>
+  </main>
+
+  <section class="pets-panel hidden" id="panel-pets">
+    <div class="pets-head">
+      <div>
+        <h2>Используемые питомцы</h2>
+        <p class="muted">Питомцы из Orca и фото, из которых они собраны.</p>
+        <input id="petsSearch" class="search" type="search" placeholder="Поиск по имени или ID…" />
+      </div>
+      <button id="refreshPets" class="ghost">Обновить</button>
+    </div>
+    <div class="pets-grid" id="petsGrid"></div>
+    <div id="petsEmpty" class="pets-empty hidden">Питомцев пока нет.</div>
+  </section>
+
+  <div id="adjustModal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Настройка фото</h3>
+      <div class="adjust-preview">
+        <div class="ap-frame" id="apFrame"><img id="apImg" alt="" /><div id="apSafeZone" class="ap-safe hidden"></div></div>
+      </div>
+      <div class="hint center">Перетащите фото мышью, чтобы сдвинуть. Анимация проигрывается как в Orca.</div>
+      <label class="slider-row">
+        <span>Масштаб</span>
+        <input id="apScale" type="range" min="50" max="200" value="100" />
+        <b id="apScaleVal">100%</b>
+      </label>
+      <div class="section-title">Обрезка краёв, %</div>
+      <div class="crop-row">
+        <label>Слева<input id="apCropL" type="number" min="0" max="45" value="0" /></label>
+        <label>Сверху<input id="apCropT" type="number" min="0" max="45" value="0" /></label>
+        <label>Справа<input id="apCropR" type="number" min="0" max="45" value="0" /></label>
+        <label>Снизу<input id="apCropB" type="number" min="0" max="45" value="0" /></label>
+      </div>
+      <label class="slider-row">
+        <span>Поворот</span>
+        <button id="apRotate" class="ghost small" type="button">Повернуть 90°</button>
+        <b id="apRotateVal">0°</b>
+      </label>
+      <label class="field row"><span>Привязка</span><select id="apAnchor"><option value="bottom">Низ</option><option value="center">Центр</option><option value="top">Верх</option></select></label>
+      <label class="check"><input id="apSafe" type="checkbox" /><span>Безопасная зона 92% и центр</span></label>
+      <div class="section-title" id="apAnimTitle">Анимация</div>
+
+      <div id="apStaticBlock">
+        <label class="check">
+          <input id="apStill" type="checkbox" checked />
+          <span>Покачивание (наклон/сдвиг)</span>
+        </label>
+        <div class="section-title">Длительности кадров, мс</div>
+        <div id="apDurations" class="dur-row"></div>
+      </div>
+
+      <div id="apGifBlock" class="hidden">
+        <label class="slider-row">
+          <span>Скорость</span>
+          <input id="apSpeed" type="range" min="0.2" max="3" step="0.1" value="1" />
+          <b id="apSpeedVal">1×</b>
+        </label>
+        <label class="check">
+          <input id="apPingpong" type="checkbox" />
+          <span>Ping-pong (только экспорт GIF/APNG)</span>
+        </label>
+        <label class="check">
+          <input id="apGifRock" type="checkbox" checked />
+          <span>Покачивание (наклон/сдвиг)</span>
+        </label>
+        <label class="check">
+          <input id="apChroma" type="checkbox" />
+          <span>Убрать однотонный фон (хромакей)</span>
+        </label>
+        <label class="field row"><span>Цвет фона</span><input id="apChromaColor" type="color" value="#ffffff" /></label>
+        <label class="field"><span>Допуск цвета</span><input id="apChromaTol" type="number" min="1" max="255" value="30" /></label>
+        <div class="section-title">Кадры GIF</div>
+        <button id="apGifLoad" class="ghost small" type="button">Загрузить кадры</button>
+        <div id="apGifFrames" class="gif-frames"><span class="muted">Нажми «Загрузить кадры»</span></div>
+      </div>
+
+      <label class="check">
+        <input id="apFlip" type="checkbox" />
+        <span>Отразить по горизонтали</span>
+      </label>
+      <div class="modal-actions">
+        <button id="apReset" class="ghost">Сброс</button>
+        <button id="apCancel" class="ghost">Отмена</button>
+        <button id="apSave" class="primary">Сохранить</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="previewModal" class="modal hidden">
+    <div class="modal-box preview-box">
+      <div class="pv-head">
+        <h3>Предпросмотр</h3>
+        <select id="pvAnim"></select>
+      </div>
+      <div class="pv-toolbar">
+        <select id="pvBg" title="Фон">
+          <option value="checker">Шахматка</option>
+          <option value="dark">Тёмный</option>
+          <option value="light">Светлый</option>
+        </select>
+        <label class="check small" title="Показывает границы одного кадра — так спрайт нарезается в Orca">
+          <input id="pvGrid" type="checkbox" /><span>Границы кадра</span>
+        </label>
+        <span class="muted" id="pvScaleInfo"></span>
+      </div>
+      <div class="pv-stage" id="pvStage">
+        <div class="pv-sprite" id="pvSprite"></div>
+        <div class="pv-frame" id="pvFrameLine"></div>
+        <div class="pv-status" id="pvStatus">Сборка…</div>
+      </div>
+      <div id="pvWarnings" class="pv-warnings hidden"></div>
+      <div class="hint">
+        GIF/APNG можно импортировать в Orca через «Загрузить своего…» — получится
+        питомец с одной анимацией (один цикл).
+      </div>
+      <div class="modal-actions">
+        <button id="pvGif" class="ghost">GIF</button>
+        <button id="pvApng" class="ghost">APNG</button>
+        <button id="pvPlay" class="ghost">Пауза</button>
+        <button id="pvClose" class="primary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="gifModal" class="modal hidden">
+    <div class="modal-box gif-box">
+      <h3>GIF по состояниям</h3>
+      <div class="hint">
+        Выбери GIF для нужных состояний (до 8 кадров берётся равномерно). Если
+        состояние не задано, Orca покажет default-анимацию.
+      </div>
+      <button id="gifMultiBtn" class="ghost small">Выбрать несколько…</button>
+      <div id="gifStates" class="gif-states"></div>
+      <label class="field">
+        <span>Анимация по умолчанию (для пустых состояний)</span>
+        <select id="gifDefault"></select>
+      </label>
+      <label class="check">
+        <input id="gifRemoveBg" type="checkbox" />
+        <span>Удалять фон (rembg, медленно)</span>
+      </label>
+      <div id="gifStatus" class="muted"></div>
+      <div class="modal-actions">
+        <button id="gifBuild" class="primary">Собрать bundle</button>
+        <button id="gifClose" class="ghost">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cutoutModal" class="modal hidden">
+    <div class="modal-box cutout-box">
+      <h3>Вырезание фона: до / после</h3>
+      <div id="cutoutStatus" class="cutout-status">Обработка… (первый раз может занять время)</div>
+      <div class="cutout-compare">
+        <figure><img id="cutoutOrig" alt="" /><figcaption>До</figcaption></figure>
+        <figure><img id="cutoutRes" alt="" /><figcaption>После</figcaption></figure>
+      </div>
+      <div class="modal-actions">
+        <button id="cutoutClose" class="primary">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="whatsNewModal" class="modal hidden">
+    <div class="modal-box">
+      <h3>Что нового</h3>
+      <div id="whatsNewBody" class="changelog"></div>
+      <div class="modal-actions"><button id="whatsNewClose" class="primary">Закрыть</button></div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+{
+  "name": "pet-sprite-builder",
+  "version": "1.1.2",
+  "description": "Desktop pet spritesheet builder",
+  "main": "main.js",
+  "author": "zhenya",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist": "node build/bump-version.js && electron-builder --win nsis && node build/copy-installer.js"
+  },
+  "build": {
+    "appId": "ru.zheny.petspritebuilder",
+    "productName": "Pet Sprite Builder",
+    "directories": {
+      "output": "dist"
+    },
+    "electronDist": "node_modules/electron/dist",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/dist/builder",
+        "to": "backend"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "build/launcher-dist/Pet Sprite Builder.exe",
+        "to": "Pet Sprite Builder.exe"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "executableName": "PetSpriteBuilderCore"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": false,
+      "runAfterFinish": false,
+      "include": "build/installer.nsh"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  }
+}
