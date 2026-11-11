@@ -125,16 +125,49 @@ ipcMain.handle('open-dir', async (_e, dir) => {
   if (dir && fs.existsSync(dir)) await shell.openPath(dir);
 });
 
-function runBackend(payload, onLog) {
-  const { cmd, args } = backendCommand();
-  const tmp = path.join(os.tmpdir(), `pet-payload-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
-  fs.writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+function backendLog(msg) {
+  try {
+    const line = `${new Date().toISOString()} ${msg}\n`;
+    fs.appendFileSync(path.join(app.getPath('userData'), 'backend.log'), line, 'utf-8');
+  } catch (_) {}
+}
 
+function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
+  const action = payload && payload.action;
   return new Promise((resolve) => {
-    const child = spawn(cmd, [...args, '--payload', tmp], {
-      windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
-    });
+    let done = false;
+    let tmp = null;
+    let timer = null;
+    let child = null;
+    const finish = (res) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      try { if (tmp) fs.unlinkSync(tmp); } catch (_) {}
+      if (!res.ok) backendLog(`action ${action} failed: ${res.error}`);
+      resolve(res);
+    };
+
+    try {
+      const { cmd, args } = backendCommand();
+      tmp = path.join(os.tmpdir(), `pet-payload-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+      fs.writeFileSync(tmp, JSON.stringify(payload), 'utf-8');
+      backendLog(`action ${action} spawn ${cmd}`);
+      child = spawn(cmd, [...args, '--payload', tmp], {
+        windowsHide: true,
+        env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+      });
+    } catch (e) {
+      backendLog(`action ${action} spawn error: ${e && e.stack ? e.stack : e}`);
+      finish({ ok: false, error: `Не удалось запустить бэкенд: ${e.message}` });
+      return;
+    }
+
+    timer = setTimeout(() => {
+      backendLog(`action ${action} timeout after ${timeoutMs} ms`);
+      try { child.kill(); } catch (_) {}
+      finish({ ok: false, error: `Бэкенд не ответил за ${Math.round(timeoutMs / 1000)} с (${action}).` });
+    }, timeoutMs);
 
     let out = '';
     let err = '';
@@ -149,23 +182,22 @@ function runBackend(payload, onLog) {
       }
     });
     child.on('error', (e) => {
-      resolve({ ok: false, error: `Не удалось запустить бэкенд (${cmd}): ${e.message}` });
+      finish({ ok: false, error: `Не удалось запустить бэкенд: ${e.message}` });
     });
     child.on('close', (code) => {
-      try { fs.unlinkSync(tmp); } catch (_) {}
       const marker = out.lastIndexOf('__RESULT__');
       if (marker >= 0) {
         try {
           const result = JSON.parse(out.slice(marker + '__RESULT__'.length).trim());
           if (result && result.error) {
-            resolve({ ok: false, error: result.error });
+            finish({ ok: false, error: result.error });
           } else {
-            resolve({ ok: true, result });
+            finish({ ok: true, result });
           }
           return;
         } catch (_) {}
       }
-      resolve({ ok: false, error: `Бэкенд завершился с кодом ${code}.\n${err || out}` });
+      finish({ ok: false, error: `Бэкенд завершился с кодом ${code}.\n${(err || out).slice(-2000)}` });
     });
   });
 }
@@ -175,7 +207,7 @@ ipcMain.handle('build', async (event, payload) => {
 });
 
 ipcMain.handle('list-pets', async () => {
-  return runBackend({ action: 'list' });
+  return runBackend({ action: 'list' }, null, { timeoutMs: 60000 });
 });
 
 ipcMain.handle('preview', async (event, payload) => {
@@ -474,6 +506,14 @@ ipcMain.handle('export-log', async (_e, logText) => {
     JSON.stringify(info, null, 2) +
     '\n\n=== Log ===\n' +
     (logText || '') +
+    '\n\n=== Backend ===\n' +
+    (() => {
+      try {
+        return fs.readFileSync(path.join(app.getPath('userData'), 'backend.log'), 'utf-8').slice(-20000);
+      } catch (_) {
+        return '(нет)';
+      }
+    })() +
     '\n';
   fs.writeFileSync(res.filePath, body, 'utf-8');
   return { ok: true, path: res.filePath };

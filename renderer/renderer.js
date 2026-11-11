@@ -11,6 +11,7 @@ const ANIMS = [
 ];
 
 const CHANGELOG = [
+  { version: '1.1.7', notes: ['Питомцы: таймаут и кнопка «Повторить» вместо вечной загрузки', 'Ошибки бэкенда пишутся в лог и попадают в диагностику'] },
   { version: '1.1.6', notes: ['Питомцы открываются быстро: миниатюры фото кэшируются', 'Список питомцев показывается из кэша сразу', 'Запуск напрямую из ярлыка без PyInstaller-лаунчера'] },
   { version: '1.1.4', notes: ['Инструменты под шестерёнкой', 'Убран URL манифеста из UI', 'Только русские подписи в карточках'] },
   { version: '1.1.3', notes: ['URL автообновления по умолчанию', 'Мелкие правки'] },
@@ -1013,6 +1014,13 @@ function writePetsCache(list) {
   } catch (_) {}
 }
 
+function showPetsError(text) {
+  const grid = document.getElementById('petsGrid');
+  grid.innerHTML = `<div class="no-sources">Не удалось загрузить питомцев: ${escapeHtml(text)}<br><br><button class="ghost small" id="retryPets">Повторить</button></div>`;
+  const btn = document.getElementById('retryPets');
+  if (btn) btn.addEventListener('click', () => loadPets());
+}
+
 async function loadPets() {
   const grid = document.getElementById('petsGrid');
   const empty = document.getElementById('petsEmpty');
@@ -1028,11 +1036,17 @@ async function loadPets() {
     }
   }
 
-  const resp = await window.api.listPets();
+  let resp;
+  try {
+    resp = await window.api.listPets();
+  } catch (e) {
+    if (!petsCache.length) showPetsError(e && e.message ? e.message : String(e));
+    return;
+  }
   grid.innerHTML = '';
 
-  if (!resp.ok) {
-    grid.innerHTML = `<div class="no-sources">Ошибка: ${escapeHtml(resp.error || 'не удалось получить список')}</div>`;
+  if (!resp || !resp.ok) {
+    if (!petsCache.length) showPetsError((resp && resp.error) || 'не удалось получить список');
     return;
   }
   const res = resp.result || {};
