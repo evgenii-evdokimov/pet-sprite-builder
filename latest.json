@@ -1,6 +1,6 @@
 {
-  "version": "1.2.1",
-  "url": "https://github.com/evgenii-evdokimov/pet-sprite-builder/releases/download/v1.2.1/PetSpriteBuilderSetup-1.2.1.exe",
+  "version": "1.2.2",
+  "url": "https://github.com/evgenii-evdokimov/pet-sprite-builder/releases/download/v1.2.2/PetSpriteBuilderSetup-1.2.2.exe",
   "notes": [
     "Инструменты под шестерёнкой",
     "Убран URL манифеста из UI",

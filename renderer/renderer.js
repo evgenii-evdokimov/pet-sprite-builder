@@ -11,6 +11,7 @@ const ANIMS = [
 ];
 
 const CHANGELOG = [
+  { version: '1.2.2', notes: ['Фото: по умолчанию модель u2net — сборка в разы быстрее', 'bria-rmbg остаётся в списке, если нужно максимальное качество'] },
   { version: '1.2.1', notes: ['Сборка GIF ускорена: один проход по кадрам + кэш кадров', 'Повторная сборка почти мгновенная', 'В журнале видно время по каждому состоянию'] },
   { version: '1.2.0', notes: ['Фото растягивается по ширине/высоте за боковые края и свободно за углы', 'Подсказка, зачем нужны длительности кадров'] },
   { version: '1.1.9', notes: ['Фото можно масштабировать, потянув за края или углы в настройке', 'Привязка (низ/центр/верх) теперь видна в предпросмотре', 'Масштаб и сдвиг работают и для GIF'] },
@@ -500,10 +501,17 @@ async function loadBgModels() {
     sel.appendChild(o);
     return;
   }
+  const speedLabel = {
+    u2net: 'быстро',
+    u2netp: 'быстро',
+    silueta: 'быстро',
+    'isnet-general-use': 'средне',
+    'bria-rmbg': 'медленно, выше качество',
+  };
   for (const m of models) {
     const o = document.createElement('option');
     o.value = m;
-    o.textContent = m;
+    o.textContent = m + (speedLabel[m] ? ' — ' + speedLabel[m] : '');
     sel.appendChild(o);
   }
   const def = pendingBgModel || (resp.result && resp.result.default) || models[0];
@@ -633,7 +641,10 @@ async function applyProject(project, opts) {
   const bgModelName = bgp.model || project.bgModel;
   if (bgModelName) {
     const sel = document.getElementById('bgModel');
-    if (Array.from(sel.options).some((o) => o.value === bgModelName)) {
+    const has = (name) => Array.from(sel.options).some((o) => o.value === name);
+    if (bgModelName === 'bria-rmbg' && has('u2net')) {
+      sel.value = 'u2net';
+    } else if (has(bgModelName)) {
       sel.value = bgModelName;
     } else {
       pendingBgModel = bgModelName;

@@ -122,7 +122,8 @@ def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=Non
         try:
             im.save(cached, "PNG")
         except Exception as e:
-            log(f"cutout cache {path}: {e!r}")
+            import traceback
+            log(f"cutout cache {path} -> {cached}: {e!r} | {traceback.format_exc()}")
     bbox = im.getbbox()
     if bbox:
         im = im.crop(bbox)
@@ -552,7 +553,12 @@ def list_bg_models():
             if os.path.isdir(os.path.join(base, n)):
                 names.append(n)
     names.sort()
-    default = "bria-rmbg" if "bria-rmbg" in names else (names[0] if names else "")
+    for fast in ("u2net", "u2netp", "silueta", "isnet-general-use"):
+        if fast in names:
+            default = fast
+            break
+    else:
+        default = "bria-rmbg" if "bria-rmbg" in names else (names[0] if names else "")
     return {"models": names, "default": default}
 
 
