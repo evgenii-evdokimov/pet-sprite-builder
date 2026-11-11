@@ -205,6 +205,9 @@ def build_sheet(
             anchor = t.get("anchor") or "bottom"
             rock = t.get("rock", True)
             crop = t.get("crop")
+            gscale = float(t.get("scale") or 1.0)
+            gtx = float(t.get("dx") or 0.0) * frame_w
+            gty = float(t.get("dy") or 0.0) * frame_h
             total = max(1, len(gframes))
             for i, fr in enumerate(gframes):
                 fr2 = fit_plain(
@@ -212,6 +215,11 @@ def build_sheet(
                     frame_w,
                     frame_h,
                 )
+                if abs(gscale - 1.0) > 1e-3:
+                    fr2 = fr2.resize(
+                        (max(1, int(fr2.width * gscale)), max(1, int(fr2.height * gscale))),
+                        Image.LANCZOS,
+                    )
                 bob = 0
                 if rock:
                     ph = 2 * math.pi * i / total
@@ -220,13 +228,13 @@ def build_sheet(
                     if rot:
                         fr2 = fr2.rotate(rot, resample=Image.BICUBIC, expand=True)
                 cell = Image.new("RGBA", (frame_w, frame_h), (0, 0, 0, 0))
-                px = (frame_w - fr2.width) // 2
+                px = (frame_w - fr2.width) // 2 + round(gtx)
                 if anchor == "center":
-                    py = (frame_h - fr2.height) // 2 + bob
+                    py = (frame_h - fr2.height) // 2 + bob + round(gty)
                 elif anchor == "top":
-                    py = 2 + bob
+                    py = 2 + bob + round(gty)
                 else:
-                    py = frame_h - fr2.height - 2 + bob
+                    py = frame_h - fr2.height - 2 + bob + round(gty)
                 cell.paste(fr2, (px, py), fr2)
                 sheet.alpha_composite(cell, (i * frame_w, row * frame_h))
             animations[name] = {

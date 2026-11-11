@@ -11,6 +11,7 @@ const ANIMS = [
 ];
 
 const CHANGELOG = [
+  { version: '1.1.9', notes: ['Фото можно масштабировать, потянув за края или углы в настройке', 'Привязка (низ/центр/верх) теперь видна в предпросмотре', 'Масштаб и сдвиг работают и для GIF'] },
   { version: '1.1.8', notes: ['Служебные файлы больше не пишутся в системный TEMP (EPERM)', 'Питомцы, модели фона и вставка из буфера снова работают'] },
   { version: '1.1.7', notes: ['Питомцы: таймаут и кнопка «Повторить» вместо вечной загрузки', 'Ошибки бэкенда пишутся в лог и попадают в диагностику'] },
   { version: '1.1.6', notes: ['Питомцы открываются быстро: миниатюры фото кэшируются', 'Список питомцев показывается из кэша сразу', 'Запуск напрямую из ярлыка без PyInstaller-лаунчера'] },
@@ -1427,12 +1428,26 @@ function updateAdjustPreview() {
   const rot = 2.0 * Math.sin(ph);
   const bob = 2.0 * Math.sin(ph) * (H / 416);
 
+  const anchor = document.getElementById('apAnchor').value;
+  const shift = adjustDy * H + bob;
+  const flip = document.getElementById('apFlip').checked ? 'scaleX(-1)' : '';
   img.style.left = `calc(50% + ${adjustDx * W}px)`;
-  img.style.bottom = '2px';
-  img.style.transformOrigin = 'bottom center';
-  img.style.transform = `translateX(-50%) translateY(${adjustDy * H + bob}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${
-    document.getElementById('apFlip').checked ? 'scaleX(-1)' : ''
-  }`;
+  if (anchor === 'top') {
+    img.style.bottom = 'auto';
+    img.style.top = '2px';
+    img.style.transformOrigin = 'top center';
+    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+  } else if (anchor === 'center') {
+    img.style.bottom = 'auto';
+    img.style.top = '50%';
+    img.style.transformOrigin = 'center center';
+    img.style.transform = `translateX(-50%) translateY(calc(-50% + ${shift}px)) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+  } else {
+    img.style.top = 'auto';
+    img.style.bottom = '2px';
+    img.style.transformOrigin = 'bottom center';
+    img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${scale}) ${flip}`;
+  }
 }
 
 function saveAdjust() {
@@ -2088,33 +2103,104 @@ function init() {
     document.getElementById(id).addEventListener('change', scheduleDraft);
   }
 
-  // Перетаскивание фото внутри кадра
+  // Перетаскивание и изменение размера фото внутри кадра
   const apFrame = document.getElementById('apFrame');
+  const apScaleEl = document.getElementById('apScale');
+  const RESIZE_EDGE = 14;
   let apDrag = null;
+
+  function resizeEdgesAt(e) {
+    const img = document.getElementById('apImg');
+    const r = img.getBoundingClientRect();
+    if (!r.width || !r.height) return null;
+    const l = Math.abs(e.clientX - r.left) <= RESIZE_EDGE;
+    const rr = Math.abs(e.clientX - r.right) <= RESIZE_EDGE;
+    const t = Math.abs(e.clientY - r.top) <= RESIZE_EDGE;
+    const b = Math.abs(e.clientY - r.bottom) <= RESIZE_EDGE;
+    if (!(l || rr || t || b)) return null;
+    if (e.clientX < r.left - RESIZE_EDGE || e.clientX > r.right + RESIZE_EDGE) return null;
+    if (e.clientY < r.top - RESIZE_EDGE || e.clientY > r.bottom + RESIZE_EDGE) return null;
+    return { l, r: rr, t, b };
+  }
+
+  function resizeCursor(m) {
+    const horiz = m.l || m.r;
+    const vert = m.t || m.b;
+    if (horiz && vert) return (m.l && m.t) || (m.r && m.b) ? 'nwse-resize' : 'nesw-resize';
+    if (horiz) return 'ew-resize';
+    return 'ns-resize';
+  }
+
+  function anchorPivot() {
+    const img = document.getElementById('apImg');
+    const r = img.getBoundingClientRect();
+    const anchor = document.getElementById('apAnchor').value;
+    const x = r.left + r.width / 2;
+    let y = r.bottom;
+    if (anchor === 'top') y = r.top;
+    else if (anchor === 'center') y = r.top + r.height / 2;
+    return { x, y };
+  }
+
   apFrame.addEventListener('pointerdown', (e) => {
     if (!adjustRow && adjustRow !== 0) return;
     e.preventDefault();
     try {
       apFrame.setPointerCapture(e.pointerId);
     } catch (_) {}
-    apDrag = { x: e.clientX, y: e.clientY, dx: adjustDx, dy: adjustDy };
-    apFrame.classList.add('dragging');
+    const edges = resizeEdgesAt(e);
+    if (edges) {
+      const pivot = anchorPivot();
+      const d0 = Math.max(8, Math.hypot(e.clientX - pivot.x, e.clientY - pivot.y));
+      apDrag = {
+        mode: 'resize',
+        pivot,
+        d0,
+        scale0: parseFloat(apScaleEl.value) / 100,
+      };
+      apFrame.style.cursor = resizeCursor(edges);
+    } else {
+      apDrag = { mode: 'move', x: e.clientX, y: e.clientY, dx: adjustDx, dy: adjustDy };
+      apFrame.classList.add('dragging');
+    }
   });
+
   apFrame.addEventListener('pointermove', (e) => {
-    if (!apDrag) return;
+    if (!apDrag) {
+      const edges = resizeEdgesAt(e);
+      apFrame.style.cursor = edges ? resizeCursor(edges) : 'grab';
+      return;
+    }
+    if (apDrag.mode === 'resize') {
+      const d = Math.max(8, Math.hypot(e.clientX - apDrag.pivot.x, e.clientY - apDrag.pivot.y));
+      const scale = Math.min(4, Math.max(0.1, apDrag.scale0 * (d / apDrag.d0)));
+      apScaleEl.value = Math.round(scale * 100);
+      updateAdjustPreview();
+      return;
+    }
     const W = apFrame.clientWidth;
     const H = apFrame.clientHeight;
     adjustDx = apDrag.dx + (e.clientX - apDrag.x) / W;
     adjustDy = apDrag.dy + (e.clientY - apDrag.y) / H;
     updateAdjustPreview();
   });
+
+  apFrame.addEventListener('pointerleave', () => {
+    if (!apDrag) apFrame.style.cursor = 'grab';
+  });
+
   const apEndDrag = () => {
     if (!apDrag) return;
     apDrag = null;
     apFrame.classList.remove('dragging');
+    apFrame.style.cursor = 'grab';
   };
   apFrame.addEventListener('pointerup', apEndDrag);
   apFrame.addEventListener('pointercancel', apEndDrag);
+  document.getElementById('apAnchor').addEventListener('change', () => {
+    updateAdjustPreview();
+    scheduleDraft();
+  });
   document.getElementById('apRotate').addEventListener('click', () => {
     adjustRotate = (adjustRotate + 90) % 360;
     document.getElementById('apRotateVal').textContent = adjustRotate + '°';
