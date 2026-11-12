@@ -12,9 +12,17 @@ const ANIMS = [
 
 const CHANGELOG = [
   {
+    version: '1.2.4',
+    notes: [
+      'Можно загружать видео (MP4/MOV/WebM/MKV) — оно конвертируется в GIF',
+      'Сборка больше не зависает на импорте rembg: numba только для alpha matting',
+      'Запуск через нативный launcher: исправлены старт и ошибка временной папки',
+    ],
+  },
+  {
     version: '1.2.3',
     notes: [
-      'Electron 45: штатная песочница без --no-sandbox, запись работает в любые папки',
+      'Electron 45 и обновлённые зависимости',
       'Фото: быстрая модель u2net по умолчанию, сборка в разы быстрее',
       'Логи сравнения вырезания фона и пояснения к порогам',
       'Всегда тёмная тема; убран чекбокс включения состояний',
@@ -140,6 +148,25 @@ function isAnimatedPath(p) {
   return /\.(gif|apng)$/i.test(p || '');
 }
 
+const VIDEO_RE = /\.(mp4|m4v|mov|webm|mkv|avi|wmv|flv)$/i;
+
+function isVideoPath(p) {
+  return VIDEO_RE.test(p || '');
+}
+
+async function toGifIfVideo(p) {
+  if (!p || !isVideoPath(p)) return p;
+  toast('Конвертирую видео в GIF…', '');
+  const resp = await window.api.convertVideo({ path: p });
+  const gif = resp && resp.ok && resp.result && resp.result.gif;
+  if (!gif) {
+    toast('Не удалось конвертировать видео: ' + ((resp && resp.error) || ''), 'err');
+    return null;
+  }
+  toast('Видео конвертировано в GIF', 'ok');
+  return gif;
+}
+
 function renderAnimOptions() {
   const box = document.getElementById('animOptions');
   if (!box) return;
@@ -154,7 +181,8 @@ function renderAnimOptions() {
     name.textContent = anim.title;
     name.title = 'Клик — выбрать/заменить фото';
     name.addEventListener('click', async () => {
-      const p = await window.api.selectImage();
+      const raw = await window.api.selectImage();
+      const p = await toGifIfVideo(raw);
       if (p) {
         cardByRow[anim.row].setPath(p);
         commitHistory();
@@ -232,7 +260,8 @@ function renderGifStates() {
     pick.className = 'ghost small';
     pick.textContent = 'Выбрать…';
     pick.addEventListener('click', async () => {
-      const p = await window.api.selectImage();
+      const raw = await window.api.selectImage();
+      const p = await toGifIfVideo(raw);
       if (p) {
         gifMap[anim.key] = p;
         renderGifStates();
@@ -774,7 +803,7 @@ function renderCard(anim) {
       </div>
     </div>
     <div class="drop">
-      <div class="placeholder">Перетащите фото<br>или нажмите</div>
+      <div class="placeholder">Перетащите фото/видео<br>или нажмите</div>
       <img class="thumb hidden" alt="" />
     </div>
     <div class="card-foot">
@@ -873,7 +902,8 @@ function renderCard(anim) {
   card.clearPath = clearPath;
 
   const pick = async () => {
-    const p = await window.api.selectImage();
+    const raw = await window.api.selectImage();
+    const p = await toGifIfVideo(raw);
     if (p) {
       setPath(p);
       commitHistory();
@@ -917,7 +947,7 @@ function renderCard(anim) {
     card.classList.add('drag');
   });
   card.addEventListener('dragleave', () => card.classList.remove('drag'));
-  card.addEventListener('drop', (e) => {
+  card.addEventListener('drop', async (e) => {
     e.preventDefault();
     card.classList.remove('drag');
 
@@ -939,7 +969,8 @@ function renderCard(anim) {
 
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     if (!file) return;
-    const p = window.api.pathForFile(file);
+    const raw = window.api.pathForFile(file);
+    const p = await toGifIfVideo(raw);
     if (p) {
       setPath(p);
       commitHistory();
@@ -1669,6 +1700,15 @@ function assignGifsByPaths(paths) {
   }
 }
 
+async function prepareMediaPaths(list) {
+  const out = [];
+  for (const raw of list || []) {
+    const p = await toGifIfVideo(raw);
+    if (p) out.push(p);
+  }
+  return out;
+}
+
 function fillFromIdle() {
   const src = paths[0] || Object.values(paths)[0];
   if (!src) {
@@ -1900,21 +1940,23 @@ function init() {
   document.getElementById('gifBuild').addEventListener('click', buildGifBundle);
   document.getElementById('gifMultiBtn').addEventListener('click', async () => {
     const list = await window.api.selectImages();
-    if (list && list.length) {
-      assignGifsByPaths(list);
+    const ready = await prepareMediaPaths(list);
+    if (ready.length) {
+      assignGifsByPaths(ready);
       renderGifStates();
     }
   });
   (() => {
     const gs = document.getElementById('gifStates');
     gs.addEventListener('dragover', (e) => e.preventDefault());
-    gs.addEventListener('drop', (e) => {
+    gs.addEventListener('drop', async (e) => {
       e.preventDefault();
       const paths = Array.from(e.dataTransfer.files || [])
         .map((f) => window.api.pathForFile(f))
         .filter(Boolean);
-      if (paths.length) {
-        assignGifsByPaths(paths);
+      const ready = await prepareMediaPaths(paths);
+      if (ready.length) {
+        assignGifsByPaths(ready);
         renderGifStates();
       }
     });

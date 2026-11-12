@@ -72,10 +72,11 @@ function backendCommand() {
 
 ipcMain.handle('select-image', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: 'Выберите фото',
+    title: 'Выберите фото или видео',
     properties: ['openFile'],
     filters: [
-      { name: 'Изображения', extensions: ['png', 'webp', 'jpg', 'jpeg', 'bmp', 'gif', 'apng'] },
+      { name: 'Фото и видео', extensions: ['png', 'webp', 'jpg', 'jpeg', 'bmp', 'gif', 'apng', 'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] },
+      { name: 'Видео', extensions: ['mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] },
       { name: 'Все файлы', extensions: ['*'] },
     ],
   });
@@ -92,9 +93,9 @@ ipcMain.handle('paste-image', async () => {
 
 ipcMain.handle('select-images', async () => {
   const res = await dialog.showOpenDialog(win, {
-    title: 'Выберите изображения/GIF',
+    title: 'Выберите изображения/GIF/видео',
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Анимации', extensions: ['gif', 'webp', 'png', 'apng'] }],
+    filters: [{ name: 'Анимации и видео', extensions: ['gif', 'webp', 'png', 'apng', 'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] }],
   });
   return res.canceled ? [] : res.filePaths;
 });
@@ -111,6 +112,14 @@ ipcMain.handle('list-bundles', async (_e, payload) => {
 
 ipcMain.handle('gif-info', async (_e, payload) => {
   return runBackend({ ...payload, action: 'gif-info' });
+});
+
+ipcMain.handle('convert-video', async (event, payload) => {
+  return runBackend(
+    { ...payload, action: 'video-to-gif' },
+    (line) => event.sender.send('build-log', line),
+    { timeoutMs: 15 * 60 * 1000 }
+  );
 });
 
 ipcMain.handle('select-dir', async () => {

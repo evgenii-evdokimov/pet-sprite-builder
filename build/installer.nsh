@@ -1,3 +1,7 @@
+; Имя папки установки не зависит от имени exe-ядра (executableName).
+!undef APP_FILENAME
+!define APP_FILENAME "Pet Sprite Builder"
+
 !macro customInstall
   CreateShortCut "$DESKTOP\Pet Sprite Builder.lnk" "$INSTDIR\Pet Sprite Builder.exe" "" "$INSTDIR\Pet Sprite Builder.exe" 0
   CreateShortCut "$SMPROGRAMS\Pet Sprite Builder.lnk" "$INSTDIR\Pet Sprite Builder.exe" "" "$INSTDIR\Pet Sprite Builder.exe" 0

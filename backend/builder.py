@@ -89,6 +89,67 @@ def cutout_cache_path(path, extra=""):
     return os.path.join(d, key + ".png")
 
 
+def new_rembg_session(model=""):
+    """Создаёт сессию rembg без импорта rembg.bg (pymatting → numba).
+
+    Импорт `rembg` целиком тянет pymatting/scipy/numba и в замороженной сборке
+    может компилироваться несколько минут. Для обычного вырезания (без alpha
+    matting) достаточно session_factory — он лёгкий.
+    """
+    import importlib.util
+    import types
+
+    if "rembg" not in sys.modules:
+        spec = importlib.util.find_spec("rembg")
+        pkg = types.ModuleType("rembg")
+        pkg.__path__ = list(getattr(spec, "submodule_search_locations", None) or [])
+        pkg.__package__ = "rembg"
+        sys.modules["rembg"] = pkg
+    from rembg.session_factory import new_session
+
+    return new_session() if not model else new_session(model)
+
+
+def remove_bg_fast(im, session, bg):
+    """Вырезание фона: быстрый путь без pymatting, alpha matting при включении."""
+    bg = bg or {}
+    alpha = bool(bg.get("alphaMatting"))
+    fg = int(bg.get("fgThreshold") or 240)
+    bgt = int(bg.get("bgThreshold") or 10)
+    erode = int(bg.get("erode") or 10)
+    if alpha:
+        from rembg.bg import remove
+
+        return remove(
+            im,
+            session=session,
+            alpha_matting=True,
+            alpha_matting_foreground_threshold=fg,
+            alpha_matting_background_threshold=bgt,
+            alpha_matting_erode_size=erode,
+        )
+    from PIL import ImageOps
+
+    img = ImageOps.exif_transpose(im).convert("RGBA")
+    masks = session.predict(img)
+    cutouts = []
+    for mask in masks or []:
+        empty = Image.new("RGBA", img.size, 0)
+        cutouts.append(Image.composite(img, empty, mask))
+    if not cutouts:
+        return img
+    if len(cutouts) == 1:
+        return cutouts[0]
+    w = max(c.width for c in cutouts)
+    h = sum(c.height for c in cutouts)
+    res = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    y = 0
+    for c in cutouts:
+        res.paste(c, (0, y))
+        y += c.height
+    return res
+
+
 def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=None, bg=None, rotate=0, crop=None, stretch_x=1.0, stretch_y=1.0):
     bg = bg or {}
     model = bg.get("model") or ""
@@ -101,23 +162,20 @@ def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=Non
     if os.path.exists(cached):
         im = Image.open(cached).convert("RGBA")
     else:
-        from rembg import new_session, remove
-
         session = None
         if session_box is not None:
             sessions = session_box.setdefault("sessions", {})
             skey = model or "__default__"
             if skey not in sessions:
                 log(f"Загрузка модели вырезания фона ({model or 'default'})…")
-                sessions[skey] = new_session() if not model else new_session(model)
+                sessions[skey] = new_rembg_session(model)
             session = sessions[skey]
-        im = remove(
+        else:
+            session = new_rembg_session(model)
+        im = remove_bg_fast(
             Image.open(path).convert("RGBA"),
-            session=session,
-            alpha_matting=alpha,
-            alpha_matting_foreground_threshold=fg,
-            alpha_matting_background_threshold=bgt,
-            alpha_matting_erode_size=erode,
+            session,
+            bg,
         )
         try:
             im.save(cached, "PNG")
@@ -643,20 +701,11 @@ def cutout_preview(path, bg):
         log(f"Кэш найден: {os.path.basename(cached)} ({round(time.time() - t0, 2)} с)")
     else:
         log("Кэш не найден — запускаю rembg…")
-        from rembg import new_session, remove
-
         ts = time.time()
-        session = new_session() if not model else new_session(model)
+        session = new_rembg_session(model)
         log(f"Модель загружена за {round(time.time() - ts, 1)} с")
         ts = time.time()
-        res = remove(
-            Image.open(path).convert("RGBA"),
-            session=session,
-            alpha_matting=alpha,
-            alpha_matting_foreground_threshold=fg,
-            alpha_matting_background_threshold=bgt,
-            alpha_matting_erode_size=erode,
-        )
+        res = remove_bg_fast(Image.open(path).convert("RGBA"), session, bg)
         log(f"Удаление фона готово за {round(time.time() - ts, 1)} с")
         try:
             res.save(cached, "PNG")
@@ -825,6 +874,84 @@ def gif_cache_dir():
     d = os.path.join(base, "PetSpriteBuilder", "gifcache")
     os.makedirs(d, exist_ok=True)
     return d
+
+
+def video_cache_dir():
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    d = os.path.join(base, "PetSpriteBuilder", "videocache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def find_ffmpeg():
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+    import shutil as _shutil
+
+    return _shutil.which("ffmpeg")
+
+
+def video_to_gif(payload):
+    """Конвертирует видео (mp4/mov/webm/…) в GIF через ffmpeg с палитрой."""
+    import subprocess
+
+    src = payload.get("path") or ""
+    if not src or not os.path.exists(src):
+        raise RuntimeError("Видео не найдено")
+    fps = max(1, min(30, int(payload.get("fps") or 15)))
+    max_side = max(64, min(1024, int(payload.get("maxSize") or 480)))
+    st = os.stat(src)
+    key = hashlib.sha256(
+        f"{os.path.abspath(src)}|{st.st_mtime_ns}|{st.st_size}|{fps}|{max_side}".encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    out = os.path.join(video_cache_dir(), key + ".gif")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return {"gif": out, "width": None, "height": None, "cached": True}
+
+    exe = find_ffmpeg()
+    if not exe:
+        raise RuntimeError("ffmpeg не найден. Установите imageio-ffmpeg.")
+
+    log(f"Конвертация видео в GIF: {os.path.basename(src)} ({fps} fps, ≤{max_side}px)…")
+    palette = (
+        f"fps={fps},"
+        f"scale={max_side}:{max_side}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+        f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+    )
+    cmd = [
+        exe,
+        "-y",
+        "-i",
+        src,
+        "-vf",
+        palette,
+        "-loop",
+        "0",
+        out,
+    ]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            timeout=600,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Конвертация видео заняла слишком много времени")
+    if proc.returncode != 0 or not os.path.exists(out):
+        tail = (proc.stderr or b"").decode("utf-8", "ignore").strip().splitlines()[-5:]
+        raise RuntimeError("ffmpeg ошибка: " + " / ".join(tail))
+    log(f"GIF готов: {out}")
+    return {"gif": out, "cached": False}
 
 
 def gif_cache_files(path, idx):
@@ -1075,22 +1202,13 @@ def build_gif_pet(payload):
         durs = [max(120, d) for d in durs]
         for i, fr in enumerate(frames):
             if remove_bg:
-                from rembg import new_session, remove
-
                 model = bg.get("model") or ""
                 sessions = session_box["sessions"]
                 skey = model or "__default__"
                 if skey not in sessions:
                     log(f"Загрузка модели ({model or 'default'})…")
-                    sessions[skey] = new_session() if not model else new_session(model)
-                fr = remove(
-                    fr,
-                    session=sessions[skey],
-                    alpha_matting=bool(bg.get("alphaMatting")),
-                    alpha_matting_foreground_threshold=int(bg.get("fgThreshold") or 240),
-                    alpha_matting_background_threshold=int(bg.get("bgThreshold") or 10),
-                    alpha_matting_erode_size=int(bg.get("erode") or 10),
-                )
+                    sessions[skey] = new_rembg_session(model)
+                fr = remove_bg_fast(fr, sessions[skey], bg)
             fr2 = fit_plain(fr.convert("RGBA"), fw, fh)
             cell = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
             px = (fw - fr2.width) // 2
@@ -1179,6 +1297,8 @@ def run(payload):
         return list_bundles(payload)
     if action == "gif-info":
         return gif_info(payload)
+    if action == "video-to-gif":
+        return video_to_gif(payload)
 
     frame_w = int(payload.get("frameWidth") or 384)
     frame_h = int(payload.get("frameHeight") or 416)

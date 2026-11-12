@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('api', {
   zipFolder: (payload) => ipcRenderer.invoke('zip-folder', payload),
   listBundles: (payload) => ipcRenderer.invoke('list-bundles', payload),
   gifInfo: (payload) => ipcRenderer.invoke('gif-info', payload),
+  convertVideo: (payload) => ipcRenderer.invoke('convert-video', payload),
   appInfo: () => ipcRenderer.invoke('app-info'),
   exportLog: (text) => ipcRenderer.invoke('export-log', text),
   getUpdateConfig: () => ipcRenderer.invoke('get-update-config'),
