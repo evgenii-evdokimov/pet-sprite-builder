@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    -webkit-app-region: drag;
+    cursor: grab;
+  }
+  body:active { cursor: grabbing; }
+  #pet {
+    position: absolute;
+    inset: 0;
+    background-repeat: no-repeat;
+    filter: drop-shadow(0 10px 16px rgba(0, 0, 0, 0.45));
+    pointer-events: none;
+  }
+  #close {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(20, 24, 34, 0.65);
+    color: #fff;
+    font: 14px/1 sans-serif;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s;
+    z-index: 4;
+    -webkit-app-region: no-drag;
+  }
+  body:hover #close { opacity: 1; }
+</style>
+</head>
+<body>
+  <div id="pet"></div>
+  <button id="close" title="Закрыть">×</button>
+  <script src="overlay.js"></script>
+</body>
+</html>

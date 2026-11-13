@@ -12,6 +12,16 @@ const ANIMS = [
 
 const CHANGELOG = [
   {
+    version: '1.2.5',
+    notes: [
+      'Видео → GIF: fps, размер, обрезка, бумеранг и живой предпросмотр; стабилизация маски между кадрами',
+      'Выбор кадров из GIF/видео и оптимизация GIF: палитра, удаление одинаковых кадров, целевой размер',
+      'Скачивание и удаление rembg-моделей, сглаживание края',
+      'Прогресс по состояниям, отмена сборки, оценка размера, длительности под FPS Orca',
+      'История с подписями, контекстное меню слотов, стрелки/зум/панорама, «до/после», автоанимация',
+    ],
+  },
+  {
     version: '1.2.4',
     notes: [
       'Можно загружать видео (MP4/MOV/WebM/MKV) — оно конвертируется в GIF',
@@ -64,12 +74,18 @@ const cardByRow = {};
 let outDir = null;
 let adjustRow = null;
 let adjustRotate = 0;
+let adjustShowCutout = false;
+let apZoom = 1;
+let apPanX = 0;
+let apPanY = 0;
+let adjustCutoutSrc = null;
 let adjustDx = 0;
 let adjustDy = 0;
 let adjustSX = 1;
 let adjustSY = 1;
 const adjustAnim = { raf: 0, t0: 0, phase: 0 };
 let pv = null;
+let pvOrcaMode = false;
 let petsCache = [];
 let draftTimer = null;
 let applyingProject = false;
@@ -81,6 +97,10 @@ let pendingBgModel = null;
 let animOptions = {};
 let gifMap = {};
 let gifCandidates = [];
+let gifSelections = {};
+let pendingUpdatePath = null;
+let gifPickKey = null;
+let gifPickCandidates = [];
 let slotClipboard = null;
 
 function updatePasteButtons() {
@@ -112,6 +132,7 @@ function gatherBg() {
     fgThreshold: parseInt(document.getElementById('bgFg').value, 10) || 240,
     bgThreshold: parseInt(document.getElementById('bgBg').value, 10) || 10,
     erode: parseInt(document.getElementById('bgErode').value, 10) || 10,
+    feather: parseInt((document.getElementById('bgFeather') || {}).value, 10) || 0,
     chroma: {
       enabled: document.getElementById('chromaOn').checked,
       ...hexToRgb(document.getElementById('chromaColor').value),
@@ -120,11 +141,67 @@ function gatherBg() {
   };
 }
 
+function readOrcaFps() {
+  const on = document.getElementById('snapFps');
+  if (on && !on.checked) return 0;
+  const v = parseInt((document.getElementById('orcaFps') || {}).value, 10);
+  return v && v > 0 ? Math.min(60, v) : 8;
+}
+
 function showProgress() {
   document.getElementById('progress').classList.remove('hidden');
 }
 function hideProgress() {
   document.getElementById('progress').classList.add('hidden');
+  bpEnd();
+}
+
+let bpTotal = 0;
+let bpDone = 0;
+let bpVisible = false;
+
+function bpStart(total) {
+  bpTotal = Math.max(1, total || 0);
+  bpDone = 0;
+  bpVisible = true;
+  const el = document.getElementById('buildProgress');
+  if (el) el.classList.remove('hidden');
+  bpUpdate('Сборка…', 0);
+}
+
+function bpUpdate(label, frac) {
+  if (!bpVisible) return;
+  const pct = Math.max(0, Math.min(100, Math.round((frac || 0) * 100)));
+  const fill = document.getElementById('bpFill');
+  const pctEl = document.getElementById('bpPct');
+  const text = document.getElementById('bpText');
+  if (fill) fill.style.width = pct + '%';
+  if (pctEl) pctEl.textContent = pct + '%';
+  if (label && text) text.textContent = label;
+}
+
+function bpEnd() {
+  bpVisible = false;
+  const el = document.getElementById('buildProgress');
+  if (el) el.classList.add('hidden');
+}
+
+function bpFromLog(line) {
+  if (!bpVisible) return;
+  let m = line.match(/^Обработка (.+)…$/);
+  if (m) {
+    bpUpdate('Обработка ' + m[1] + '…', bpDone / bpTotal);
+    return;
+  }
+  m = line.match(/^GIF: (.+)…$/);
+  if (m) {
+    bpUpdate('GIF: ' + m[1] + '…', bpDone / bpTotal);
+    return;
+  }
+  if (/^[\w-]+: (готово|\d+ кадров)/.test(line)) {
+    bpDone++;
+    bpUpdate('', bpDone / bpTotal);
+  }
 }
 
 function baseDurations(anim) {
@@ -154,17 +231,122 @@ function isVideoPath(p) {
   return VIDEO_RE.test(p || '');
 }
 
-async function toGifIfVideo(p) {
+const VIDEO_OPTS_KEY = 'psb.videoOpts';
+
+function loadVideoOpts() {
+  try {
+    const o = JSON.parse(localStorage.getItem(VIDEO_OPTS_KEY) || '{}');
+    return {
+      fps: Math.min(30, Math.max(1, parseInt(o.fps, 10) || 15)),
+      maxSize: Math.min(1024, Math.max(64, parseInt(o.maxSize, 10) || 480)),
+      start: Math.max(0, parseFloat(o.start) || 0),
+      end: Math.max(0, parseFloat(o.end) || 0),
+      boomerang: !!o.boomerang,
+    };
+  } catch (_) {
+    return { fps: 15, maxSize: 480, start: 0, end: 0, boomerang: false };
+  }
+}
+
+function saveVideoOpts(o) {
+  try {
+    localStorage.setItem(VIDEO_OPTS_KEY, JSON.stringify(o));
+  } catch (_) {}
+}
+
+let videoModalResolve = null;
+let vidPreviewSrc = null;
+let vidPreviewTimer = null;
+let vidPreviewSeq = 0;
+
+function askVideoOptions(path) {
+  const o = loadVideoOpts();
+  document.getElementById('videoName').textContent = String(path).split(/[\/]/).pop();
+  document.getElementById('vidFps').value = o.fps;
+  document.getElementById('vidSize').value = o.maxSize;
+  document.getElementById('vidStart').value = o.start || '';
+  document.getElementById('vidEnd').value = o.end || '';
+  document.getElementById('vidBoom').checked = !!o.boomerang;
+  vidPreviewSrc = path;
+  document.getElementById('vidPreviewImg').classList.add('hidden');
+  document.getElementById('vidPreviewImg').removeAttribute('src');
+  document.getElementById('vidPreviewStatus').textContent = 'Предпросмотр…';
+  document.getElementById('videoModal').classList.remove('hidden');
+  scheduleVideoPreview();
+  return new Promise((resolve) => {
+    videoModalResolve = resolve;
+  });
+}
+
+function scheduleVideoPreview() {
+  clearTimeout(vidPreviewTimer);
+  vidPreviewTimer = setTimeout(updateVideoPreview, 450);
+}
+
+function readVideoOptsRaw() {
+  return {
+    fps: Math.min(30, Math.max(1, parseInt(document.getElementById('vidFps').value, 10) || 15)),
+    maxSize: Math.min(1024, Math.max(64, parseInt(document.getElementById('vidSize').value, 10) || 480)),
+    start: Math.max(0, parseFloat(document.getElementById('vidStart').value) || 0),
+    end: Math.max(0, parseFloat(document.getElementById('vidEnd').value) || 0),
+    boomerang: document.getElementById('vidBoom').checked,
+  };
+}
+
+async function updateVideoPreview() {
+  if (!vidPreviewSrc) return;
+  const seq = ++vidPreviewSeq;
+  const img = document.getElementById('vidPreviewImg');
+  const status = document.getElementById('vidPreviewStatus');
+  status.textContent = 'Готовлю предпросмотр…';
+  const resp = await window.api.videoPreview({ path: vidPreviewSrc, ...readVideoOptsRaw() });
+  if (seq !== vidPreviewSeq) return;
+  if (!resp.ok || !resp.result || !resp.result.gif) {
+    status.textContent = 'Не удалось построить предпросмотр: ' + ((resp && resp.error) || '');
+    return;
+  }
+  img.src = '';
+  img.src = toFileUrl(resp.result.gif);
+  img.classList.remove('hidden');
+  status.textContent = 'Предпросмотр (первые ~3 с, уменьшенный)';
+}
+
+function closeVideoModal(result) {
+  clearTimeout(vidPreviewTimer);
+  vidPreviewSeq++;
+  vidPreviewSrc = null;
+  document.getElementById('videoModal').classList.add('hidden');
+  const r = videoModalResolve;
+  videoModalResolve = null;
+  if (r) r(result);
+}
+
+function readVideoOptsFromUi() {
+  const o = {
+    fps: Math.min(30, Math.max(1, parseInt(document.getElementById('vidFps').value, 10) || 15)),
+    maxSize: Math.min(1024, Math.max(64, parseInt(document.getElementById('vidSize').value, 10) || 480)),
+    start: Math.max(0, parseFloat(document.getElementById('vidStart').value) || 0),
+    end: Math.max(0, parseFloat(document.getElementById('vidEnd').value) || 0),
+    boomerang: document.getElementById('vidBoom').checked,
+  };
+  saveVideoOpts(o);
+  return o;
+}
+
+async function toGifIfVideo(p, opts) {
   if (!p || !isVideoPath(p)) return p;
+  const silent = !!(opts && opts.silent);
+  const vo = silent ? loadVideoOpts() : await askVideoOptions(p);
+  if (!vo) return null;
   toast('Конвертирую видео в GIF…', '');
-  const resp = await window.api.convertVideo({ path: p });
+  const resp = await window.api.convertVideo({ path: p, ...vo });
   const gif = resp && resp.ok && resp.result && resp.result.gif;
   if (!gif) {
     toast('Не удалось конвертировать видео: ' + ((resp && resp.error) || ''), 'err');
     return null;
   }
   toast('Видео конвертировано в GIF', 'ok');
-  return gif;
+  return (await window.api.importFile(gif)) || gif;
 }
 
 function renderAnimOptions() {
@@ -185,7 +367,7 @@ function renderAnimOptions() {
       const p = await toGifIfVideo(raw);
       if (p) {
         cardByRow[anim.row].setPath(p);
-        commitHistory();
+        commitHistory('Фото в слот');
         addRecent(p);
         renderAnimOptions();
       }
@@ -230,6 +412,99 @@ function renderAnimOptions() {
   }
 }
 
+function evenFrameSet(frames) {
+  const set = new Set();
+  const n = frames.length;
+  if (!n) return set;
+  const k = Math.min(8, n);
+  if (n <= 8) {
+    frames.forEach((f) => set.add(f.index));
+    return set;
+  }
+  for (let i = 0; i < k; i++) {
+    set.add(frames[Math.round((i * (n - 1)) / (k - 1))].index);
+  }
+  return set;
+}
+
+async function openGifPicker(key) {
+  const path = gifMap[key];
+  if (!path) return;
+  gifPickKey = key;
+  document.getElementById('gpTitle').textContent = 'Кадры: ' + path.split(/[\/]/).pop();
+  document.getElementById('gpFrames').innerHTML = '<span class="muted">Загрузка…</span>';
+  document.getElementById('gifPickModal').classList.remove('hidden');
+  const resp = await window.api.gifInfo({ path });
+  if (!resp.ok || (resp.result && resp.result.error)) {
+    document.getElementById('gpFrames').innerHTML = '<span class="muted">Не удалось прочитать GIF</span>';
+    return;
+  }
+  const frames = (resp.result && resp.result.frames) || [];
+  const sel = gifSelections[key];
+  const picked = sel && Array.isArray(sel.frames) ? sel.frames : null;
+  const autoPick = evenFrameSet(frames);
+  gifPickCandidates = frames.map((f) => ({
+    index: f.index,
+    thumb: f.thumb,
+    duration: sel && sel.durs && picked ? sel.durs[picked.indexOf(f.index)] || f.duration : f.duration,
+    checked: picked ? picked.includes(f.index) : autoPick.has(f.index),
+  }));
+  if (picked) {
+    gifPickCandidates.sort((a, b) => picked.indexOf(a.index) - picked.indexOf(b.index));
+  }
+  renderGifPickFrames();
+}
+
+function renderGifPickFrames() {
+  const box = document.getElementById('gpFrames');
+  if (!box) return;
+  box.innerHTML = '';
+  gifPickCandidates.forEach((c) => {
+    const d = document.createElement('div');
+    d.className = 'gframe' + (c.checked ? '' : ' off');
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.className = 'gchk';
+    chk.checked = c.checked;
+    chk.addEventListener('change', () => {
+      c.checked = chk.checked;
+      d.classList.toggle('off', !chk.checked);
+    });
+    const img = document.createElement('img');
+    img.src = toFileUrl(c.thumb);
+    const dur = document.createElement('input');
+    dur.type = 'number';
+    dur.min = '20';
+    dur.value = c.duration;
+    dur.title = 'Длительность кадра, мс';
+    dur.addEventListener('input', () => {
+      c.duration = parseInt(dur.value, 10) || c.duration;
+    });
+    d.appendChild(chk);
+    d.appendChild(img);
+    d.appendChild(dur);
+    box.appendChild(d);
+  });
+}
+
+function saveGifPicker() {
+  if (!gifPickKey) return;
+  const checked = gifPickCandidates.filter((c) => c.checked);
+  if (!checked.length) {
+    toast('Выбери хотя бы один кадр', 'err');
+    return;
+  }
+  const truncated = checked.length > 8;
+  const selected = checked.slice(0, 8);
+  gifSelections[gifPickKey] = {
+    frames: selected.map((c) => c.index),
+    durs: selected.map((c) => c.duration),
+  };
+  document.getElementById('gifPickModal').classList.add('hidden');
+  renderGifStates();
+  toast(truncated ? 'Кадры сохранены (первые 8)' : 'Кадры сохранены', 'ok');
+}
+
 function renderGifStates() {
   const box = document.getElementById('gifStates');
   if (!box) return;
@@ -263,6 +538,7 @@ function renderGifStates() {
       const raw = await window.api.selectImage();
       const p = await toGifIfVideo(raw);
       if (p) {
+        delete gifSelections[anim.key];
         gifMap[anim.key] = p;
         renderGifStates();
       }
@@ -273,11 +549,19 @@ function renderGifStates() {
     del.textContent = '×';
     del.addEventListener('click', () => {
       delete gifMap[anim.key];
+      delete gifSelections[anim.key];
       renderGifStates();
     });
 
+    const fpick = document.createElement('button');
+    fpick.className = 'ghost small';
+    fpick.textContent = 'Кадры…';
+    if (gifSelections[anim.key]) fpick.classList.add('active');
+    fpick.addEventListener('click', () => openGifPicker(anim.key));
+
     row.appendChild(name);
     row.appendChild(file);
+    if (gifMap[anim.key]) row.appendChild(fpick);
     row.appendChild(pick);
     row.appendChild(del);
     box.appendChild(row);
@@ -296,6 +580,7 @@ async function buildGifBundle() {
   status.style.color = '';
   const payload = {
     gifs,
+    selections: gifSelections,
     frameWidth: parseInt(document.getElementById('frameW').value, 10) || 384,
     frameHeight: parseInt(document.getElementById('frameH').value, 10) || 416,
     label: document.getElementById('label').value.trim() || 'My Pet',
@@ -330,12 +615,7 @@ async function buildGifBundle() {
   toast('GIF bundle готов: ' + r.folder, 'ok');
 }
 
-async function importBundleHandler() {
-  const r = await window.api.importBundle();
-  if (!r.ok) {
-    if (!r.canceled) toast('Ошибка: ' + r.error, 'err');
-    return;
-  }
+async function applyBundleResult(r) {
   const m = r.manifest || {};
   const frame = m.frame || {};
   if (r.sources) {
@@ -368,9 +648,19 @@ async function importBundleHandler() {
   }
 }
 
-async function compareCutout() {
-  if (hoverRow == null || !paths[hoverRow]) {
-    toast('Наведи курсор на слот с фото', 'err');
+async function importBundleHandler() {
+  const r = await window.api.importBundle();
+  if (!r.ok) {
+    if (!r.canceled) toast('Ошибка: ' + r.error, 'err');
+    return;
+  }
+  await applyBundleResult(r);
+}
+
+async function compareCutout(row) {
+  const target = row != null && row !== '' ? row : hoverRow;
+  if (target == null || !paths[target]) {
+    toast('Нет фото для сравнения', 'err');
     return;
   }
   const modal = document.getElementById('cutoutModal');
@@ -381,7 +671,7 @@ async function compareCutout() {
   status.textContent = 'Обработка… (первый раз может занять время)';
   status.style.color = '';
   showProgress();
-  const resp = await window.api.cutoutPreview({ path: paths[hoverRow], bg: gatherBg() });
+  const resp = await window.api.cutoutPreview({ path: paths[target], bg: gatherBg() });
   hideProgress();
   if (!resp.ok || (resp.result && resp.result.error)) {
     status.textContent = 'Ошибка: ' + (resp.error || (resp.result && resp.result.error) || 'не удалось вырезать');
@@ -393,8 +683,9 @@ async function compareCutout() {
   document.getElementById('cutoutRes').src = toFileUrl(resp.result.cutout);
 }
 
-function commitHistory() {
+function commitHistory(label) {
   if (applyingProject) return;
+  window.api.setDirty(true);
   const snap = currentProject();
   history.states = history.states.slice(0, history.idx + 1);
   history.states.push(snap);
@@ -404,7 +695,7 @@ function commitHistory() {
   try {
     const h = JSON.parse(localStorage.getItem('psb.history') || '[]');
     if (Array.isArray(h)) {
-      h.unshift({ t: Date.now(), project: snap });
+      h.unshift({ t: Date.now(), label: label || 'Изменение', project: snap });
       localStorage.setItem('psb.history', JSON.stringify(h.slice(0, 30)));
     }
   } catch (_) {}
@@ -442,11 +733,16 @@ function restoreSnapshot(proj) {
   document.getElementById('label').value = proj.label || 'My Pet';
   document.getElementById('petId').value = proj.petId || '';
   document.getElementById('consistent').checked = proj.consistentScale !== false;
+  if (document.getElementById('snapFps')) {
+    document.getElementById('snapFps').checked = proj.snapFps !== false;
+    document.getElementById('orcaFps').value = proj.orcaFps || 8;
+  }
   const bgp = proj.bg || {};
   document.getElementById('bgAlpha').checked = !!bgp.alphaMatting;
   document.getElementById('bgFg').value = bgp.fgThreshold || 240;
   document.getElementById('bgBg').value = bgp.bgThreshold || 10;
   document.getElementById('bgErode').value = bgp.erode || 10;
+  if (document.getElementById('bgFeather')) document.getElementById('bgFeather').value = bgp.feather || 0;
   const chroma = bgp.chroma || {};
   document.getElementById('chromaOn').checked = !!chroma.enabled;
   document.getElementById('chromaColor').value = rgbToHex(chroma.r ?? 255, chroma.g ?? 255, chroma.b ?? 255);
@@ -460,7 +756,9 @@ function restoreSnapshot(proj) {
   document.getElementById('webpMode').value = proj.webpMode || 'lossless';
   for (const anim of ANIMS) cardByRow[anim.row].updateTune();
   applyingProject = false;
+  window.api.setDirty(false);
   scheduleDraft();
+  window.api.setDirty(false);
 }
 
 function undo() {
@@ -504,7 +802,7 @@ async function loadRecents() {
     item.addEventListener('click', () => {
       const row = hoverRow == null ? firstEmptyRow() : hoverRow;
       cardByRow[row].setPath(p);
-      commitHistory();
+      commitHistory('Недавнее фото');
       toast('Фото вставлено: ' + p.split(/[\\/]/).pop(), 'ok');
     });
     grid.appendChild(item);
@@ -528,28 +826,149 @@ async function loadBgModels() {
     sel.appendChild(o);
     return;
   }
-  const speedLabel = {
-    u2net: 'быстро',
-    u2netp: 'быстро',
-    silueta: 'быстро',
-    'isnet-general-use': 'средне',
-    'bria-rmbg': 'медленно, выше качество',
+  const MODEL_INFO = {
+    u2net: 'быстро · универсальная',
+    u2netp: 'быстро · лёгкая',
+    silueta: 'быстро · универсальная',
+    'isnet-general-use': 'средне · универсальная',
+    'isnet-anime': 'средне · аниме и персонажи',
+    'u2net_human_seg': 'средне · люди',
+    'u2net_cloth_seg': 'средне · одежда',
+    'bria-rmbg': 'медленно · высокое качество',
+    'birefnet-general': 'медленно · высокое качество',
+    'birefnet-general-lite': 'средне · качество/скорость',
+    'birefnet-general-fp16': 'быстрее · как general',
+    'birefnet-portrait': 'медленно · портреты и люди',
+    'birefnet-dis': 'медленно · объект/фон',
+    'birefnet-hrsod': 'медленно · высокое разрешение',
+    'birefnet-cod': 'медленно · скрытые объекты',
+    'birefnet-massive': 'очень медленно · максимум качества',
   };
   for (const m of models) {
     const o = document.createElement('option');
     o.value = m;
-    o.textContent = m + (speedLabel[m] ? ' — ' + speedLabel[m] : '');
+    o.textContent = m + (MODEL_INFO[m] ? ' — ' + MODEL_INFO[m] : '');
     sel.appendChild(o);
   }
   const def = pendingBgModel || (resp.result && resp.result.default) || models[0];
   sel.value = models.includes(def) ? def : models[0];
   pendingBgModel = null;
+
+  const inst = document.getElementById('bgModelInstalled');
+  if (inst) {
+    inst.innerHTML = '';
+    for (const m of models) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = m + (MODEL_INFO[m] ? ' — ' + MODEL_INFO[m] : '');
+      inst.appendChild(o);
+    }
+    inst.value = sel.value || models[0];
+    updateInstalledModelInfo();
+  }
+
+  const dl = document.getElementById('bgModelDownload');
+  if (dl) {
+    const downloadable = ((resp.result && resp.result.downloadable) || []).filter(
+      (m) => !models.includes(m)
+    );
+    dl.innerHTML = '';
+    if (!downloadable.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = 'Все модели уже скачаны';
+      dl.appendChild(o);
+    } else {
+      for (const m of downloadable) {
+        const o = document.createElement('option');
+        o.value = m;
+        o.textContent = m + (MODEL_INFO[m] ? ' — ' + MODEL_INFO[m] : '');
+        dl.appendChild(o);
+      }
+    }
+  }
+}
+
+function updateInstalledModelInfo() {
+  const inst = document.getElementById('bgModelInstalled');
+  const el = document.getElementById('bgModelSize');
+  if (!inst || !el) return;
+  const name = inst.value;
+  if (!name) {
+    el.textContent = '';
+    return;
+  }
+  window.api.modelsInfo().then((r) => {
+    const list = (r && r.ok && r.result && r.result.models) || [];
+    const found = list.find((m) => m.name === name);
+    el.textContent = found
+      ? 'Размер: ' + fmtBytes(found.bytes) + ' · ' + (r.result.path || '')
+      : '';
+  });
+}
+
+async function deleteBgModelFromUi() {
+  const inst = document.getElementById('bgModelInstalled');
+  const status = document.getElementById('bgModelStatus');
+  const name = inst ? inst.value : '';
+  if (!name) return;
+  if (!confirm('Удалить модель «' + name + '»? Она скачается снова при необходимости.')) return;
+  status.textContent = 'Удаление «' + name + '»…';
+  const r = await window.api.deleteBgModel({ model: name });
+  if (!r.ok || (r.result && r.result.error)) {
+    status.textContent = 'Ошибка: ' + ((r && r.error) || (r.result && r.result.error) || '');
+    return;
+  }
+  status.textContent = 'Удалено: ' + name + (r.result ? ' (' + fmtBytes(r.result.freedBytes) + ')' : '');
+  await loadBgModels();
+}
+
+let bgModelDownloading = false;
+async function downloadBgModelFromUi() {
+  const sel = document.getElementById('bgModelDownload');
+  const status = document.getElementById('bgModelStatus');
+  const btn = document.getElementById('bgModelDownloadBtn');
+  const name = sel ? sel.value : '';
+  if (!name) {
+    toast('Выбери модель для скачивания', 'err');
+    return;
+  }
+  if (bgModelDownloading) {
+    toast('Модель уже скачивается', '');
+    return;
+  }
+  bgModelDownloading = true;
+  if (btn) btn.disabled = true;
+  status.textContent = 'Скачивание «' + name + '»…';
+  showProgress();
+  let r;
+  try {
+    r = await window.api.downloadBgModel({ model: name });
+  } finally {
+    hideProgress();
+    bgModelDownloading = false;
+    if (btn) btn.disabled = false;
+  }
+  if (!r.ok || (r.result && r.result.error)) {
+    status.textContent = 'Ошибка: ' + ((r && r.error) || (r.result && r.result.error) || '');
+    toast('Не удалось скачать модель', 'err');
+    return;
+  }
+  status.textContent = 'Модель скачана: ' + name;
+  await loadBgModels();
+  document.getElementById('bgModel').value = name;
+  toast('Модель скачана: ' + name, 'ok');
 }
 
 async function saveProject() {
   const r = await window.api.saveProject(currentProject());
-  if (r.ok) toast('Проект сохранён: ' + r.path, 'ok');
-  else if (!r.canceled) toast('Ошибка сохранения: ' + r.error, 'err');
+  if (r.ok) {
+    window.api.setDirty(false);
+    toast('Проект сохранён: ' + r.path, 'ok');
+  } else if (!r.canceled) {
+    toast('Ошибка сохранения: ' + r.error, 'err');
+  }
+  return !!r.ok;
 }
 
 function applyPvBg() {
@@ -568,11 +987,18 @@ async function exportAnim(fmt) {
   const payload = gatherPayload();
   payload.animation = pv.animName;
   payload.format = fmt;
+  bpStart(Object.keys(paths).length);
   appendLog(`Экспорт ${fmt.toUpperCase()}…`);
   const resp = await window.api.exportAnimation(payload);
   if (!resp.ok || (resp.result && resp.result.error)) {
-    toast('Ошибка экспорта', 'err');
-    appendLog(resp.error || (resp.result && resp.result.error) || 'неизвестная ошибка');
+    const err = resp.error || (resp.result && resp.result.error) || 'неизвестная ошибка';
+    if (/отмен/i.test(err)) {
+      toast('Экспорт отменён', '');
+      appendLog('Экспорт отменён');
+    } else {
+      toast('Ошибка экспорта', 'err');
+      appendLog(err);
+    }
   } else {
     appendLog('Сохранено: ' + resp.result.path);
     toast('Сохранено: ' + resp.result.path + '. Для Orca: «Загрузить своего…» (одна анимация).', 'ok');
@@ -587,7 +1013,7 @@ async function pasteInto(row) {
   }
   if (cardByRow[row]) {
     cardByRow[row].setPath(p);
-    commitHistory();
+    commitHistory('Вставка из буфера');
     addRecent(p);
   }
 }
@@ -615,13 +1041,14 @@ function newPet() {
   document.getElementById('consistent').checked = true;
 
   scheduleDraft();
-  commitHistory();
+  commitHistory('Новый питомец');
   switchTab('builder');
   toast('Новый питомец: все ячейки очищены', 'ok');
 }
 
 function scheduleDraft() {
   if (applyingProject) return;
+  window.api.setDirty(true);
   clearTimeout(draftTimer);
   draftTimer = setTimeout(() => {
     window.api.saveDraft(currentProject());
@@ -642,6 +1069,8 @@ function currentProject() {
     animOptions: JSON.parse(JSON.stringify(animOptions)),
     disabled: [],
     webpMode: document.getElementById('webpMode').value,
+    snapFps: !document.getElementById('snapFps') || document.getElementById('snapFps').checked,
+    orcaFps: parseInt((document.getElementById('orcaFps') || {}).value, 10) || 8,
     outDir: outDir || '',
   };
 }
@@ -656,11 +1085,16 @@ async function applyProject(project, opts) {
   document.getElementById('label').value = project.label || 'My Pet';
   document.getElementById('petId').value = project.petId || '';
   document.getElementById('consistent').checked = project.consistentScale !== false;
+  if (document.getElementById('snapFps')) {
+    document.getElementById('snapFps').checked = project.snapFps !== false;
+    document.getElementById('orcaFps').value = project.orcaFps || 8;
+  }
   const bgp = project.bg || {};
   document.getElementById('bgAlpha').checked = !!(bgp.alphaMatting || project.bgAlpha);
   document.getElementById('bgFg').value = bgp.fgThreshold || 240;
   document.getElementById('bgBg').value = bgp.bgThreshold || 10;
   document.getElementById('bgErode').value = bgp.erode || 10;
+  if (document.getElementById('bgFeather')) document.getElementById('bgFeather').value = bgp.feather || 0;
   const chroma = bgp.chroma || {};
   document.getElementById('chromaOn').checked = !!chroma.enabled;
   document.getElementById('chromaColor').value = rgbToHex(chroma.r ?? 255, chroma.g ?? 255, chroma.b ?? 255);
@@ -698,7 +1132,8 @@ async function applyProject(project, opts) {
     const p = rows[k];
     if (!cardByRow[row]) continue;
     if (exists[p]) {
-      cardByRow[row].setPath(p, { preserve: true });
+      const imported = (await window.api.importFile(p)) || p;
+      cardByRow[row].setPath(imported, { preserve: true });
       applied++;
     } else {
       missing.push(p.split(/[\\/]/).pop());
@@ -744,6 +1179,7 @@ function setLog(text) {
 }
 
 function appendLog(line) {
+  bpFromLog(line);
   const el = document.getElementById('log');
   el.textContent += (el.textContent ? '\n' : '') + line;
   el.scrollTop = el.scrollHeight;
@@ -786,6 +1222,141 @@ function updateAnimNames() {
   });
 }
 
+const mediaInfoCache = new Map();
+
+async function updateSlotMeta(el, path) {
+  if (!el) return;
+  el.textContent = '';
+  try {
+    let info = mediaInfoCache.get(path);
+    if (!info) {
+      const r = await window.api.mediaInfo({ path });
+      if (!r.ok || !r.result) return;
+      info = r.result;
+      mediaInfoCache.set(path, info);
+    }
+    const fps = info.fps ? Math.round(info.fps * 10) / 10 + ' fps' : '';
+    el.textContent =
+      info.width +
+      '×' +
+      info.height +
+      ' · ' +
+      (info.animated ? 'GIF ' + info.frames + ' кадр. ' + fps : 'фото');
+    el.title = el.textContent;
+  } catch (_) {}
+}
+
+let slotMenuEl = null;
+
+function closeSlotMenu() {
+  if (slotMenuEl && slotMenuEl.parentNode) slotMenuEl.parentNode.removeChild(slotMenuEl);
+  slotMenuEl = null;
+}
+
+function showSlotMenu(row, x, y) {
+  closeSlotMenu();
+  const card = cardByRow[row];
+  if (!card) return;
+  const menu = document.createElement('div');
+  menu.className = 'slot-menu';
+  const items = [
+    {
+      label: 'Заменить…',
+      action: async () => {
+        const raw = await window.api.selectImage();
+        const p = await toGifIfVideo(raw);
+        if (p) {
+          card.setPath(p);
+          commitHistory('Фото в слот');
+          addRecent(p);
+        }
+      },
+    },
+    {
+      label: 'Очистить',
+      disabled: !paths[row],
+      action: () => {
+        card.clearPath();
+        commitHistory('Очистка слота');
+      },
+    },
+    {
+      label: 'Сбросить настройку',
+      disabled: !transforms[row],
+      action: () => {
+        delete transforms[row];
+        if (card.updateTune) card.updateTune();
+        scheduleDraft();
+        commitHistory('Сброс настройки слота');
+      },
+    },
+    {
+      label: 'Сравнить до/после',
+      disabled: !paths[row],
+      action: () => compareCutout(row),
+    },
+    {
+      label: 'Вписать в безопасную зону',
+      disabled: !paths[row],
+      action: () => {
+        const t = transforms[row] ? JSON.parse(JSON.stringify(transforms[row])) : {};
+        t.scale = 1;
+        t.stretchX = 1;
+        t.stretchY = 1;
+        t.dx = 0;
+        t.dy = 0;
+        delete t.crop;
+        if (isDefaultTransform(t)) delete transforms[row];
+        else transforms[row] = t;
+        if (card.updateTune) card.updateTune();
+        scheduleDraft();
+        commitHistory('Вписать слот в безопасную зону');
+      },
+    },
+    {
+      label: 'Вставить сюда',
+      disabled: !slotClipboard,
+      action: () => {
+        if (!slotClipboard) return;
+        card.setPath(slotClipboard.path, { preserve: true });
+        if (slotClipboard.transform) {
+          transforms[row] = JSON.parse(JSON.stringify(slotClipboard.transform));
+        } else {
+          delete transforms[row];
+        }
+        if (card.updateTune) card.updateTune();
+        updateSlotCount();
+        scheduleDraft();
+        commitHistory('Вставка слота');
+      },
+    },
+  ];
+  for (const it of items) {
+    const b = document.createElement('button');
+    b.className = 'slot-menu-item';
+    b.textContent = it.label;
+    b.disabled = !!it.disabled;
+    b.addEventListener('click', () => {
+      closeSlotMenu();
+      it.action();
+    });
+    menu.appendChild(b);
+  }
+  document.body.appendChild(menu);
+  slotMenuEl = menu;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = Math.min(x, window.innerWidth - rect.width - 8) + 'px';
+  menu.style.top = Math.min(y, window.innerHeight - rect.height - 8) + 'px';
+}
+
+document.addEventListener('pointerdown', (e) => {
+  if (slotMenuEl && !slotMenuEl.contains(e.target)) closeSlotMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeSlotMenu();
+});
+window.addEventListener('blur', closeSlotMenu);
+
 function renderCard(anim) {
   const card = document.createElement('div');
   card.className = 'card' + (anim.required ? ' required' : '');
@@ -808,6 +1379,7 @@ function renderCard(anim) {
     </div>
     <div class="card-foot">
       <div class="file-name"></div>
+      <div class="file-meta"></div>
       <button class="paste ghost small" title="Вставить фото из буфера обмена">Вставить</button>
       <button class="clear ghost small hidden" title="Очистить слот">×</button>
       <button class="tune ghost small hidden">Настроить</button>
@@ -818,6 +1390,7 @@ function renderCard(anim) {
   const thumb = card.querySelector('.thumb');
   const placeholder = card.querySelector('.placeholder');
   const nameEl = card.querySelector('.file-name');
+  const metaEl = card.querySelector('.file-meta');
   const tuneBtn = card.querySelector('.tune');
   const pasteBtn = card.querySelector('.paste');
   const clearBtn = card.querySelector('.clear');
@@ -846,7 +1419,7 @@ function renderCard(anim) {
     updateTune();
     updateSlotCount();
     scheduleDraft();
-    commitHistory();
+    commitHistory('Вставка слота');
   });
 
   const updateTune = () => {
@@ -873,6 +1446,7 @@ function renderCard(anim) {
     placeholder.classList.add('hidden');
     nameEl.textContent = p.split(/[\\/]/).pop();
     nameEl.title = p;
+    updateSlotMeta(metaEl, p);
     tuneBtn.classList.remove('hidden');
     clearBtn.classList.remove('hidden');
     updateTune();
@@ -891,6 +1465,7 @@ function renderCard(anim) {
     placeholder.classList.remove('hidden');
     nameEl.textContent = '';
     nameEl.title = '';
+    if (metaEl) metaEl.textContent = '';
     tuneBtn.classList.add('hidden');
     clearBtn.classList.add('hidden');
     updateSlotCount();
@@ -906,7 +1481,7 @@ function renderCard(anim) {
     const p = await toGifIfVideo(raw);
     if (p) {
       setPath(p);
-      commitHistory();
+      commitHistory('Фото в слот');
       addRecent(p);
     }
   };
@@ -922,7 +1497,7 @@ function renderCard(anim) {
   clearBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     clearPath();
-    commitHistory();
+    commitHistory('Очистка слота');
   });
   card.addEventListener('pointerenter', () => {
     hoverRow = anim.row;
@@ -960,9 +1535,10 @@ function renderCard(anim) {
     if (e.dataTransfer.types.includes('application/x-pet-path')) {
       const p = e.dataTransfer.getData('application/x-pet-path');
       if (p) {
-        setPath(p);
-        commitHistory();
-        addRecent(p);
+        const imported = (await window.api.importFile(p)) || p;
+        setPath(imported);
+        commitHistory('Перетаскивание фото');
+        addRecent(imported);
       }
       return;
     }
@@ -970,12 +1546,18 @@ function renderCard(anim) {
     const file = e.dataTransfer.files && e.dataTransfer.files[0];
     if (!file) return;
     const raw = window.api.pathForFile(file);
-    const p = await toGifIfVideo(raw);
+    const imported = raw ? (await window.api.importFile(raw)) || raw : null;
+    const p = await toGifIfVideo(imported);
     if (p) {
       setPath(p);
-      commitHistory();
+      commitHistory('Фото в слот');
       addRecent(p);
     }
+  });
+
+  card.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showSlotMenu(anim.row, e.clientX, e.clientY);
   });
 
   return card;
@@ -999,7 +1581,7 @@ function swapRows(a, b) {
   cardByRow[a].updateTune();
   cardByRow[b].updateTune();
   scheduleDraft();
-  commitHistory();
+  commitHistory('Обмен слотов');
 }
 
 function switchTab(name) {
@@ -1151,7 +1733,7 @@ function renderPetCard(pet) {
       document.getElementById('label').value = (pet.label || 'Pet') + ' копия';
       document.getElementById('petId').value = '';
       scheduleDraft();
-      commitHistory();
+      commitHistory('Клонирование питомца');
     });
   }
 
@@ -1184,7 +1766,7 @@ function reusePet(pet) {
   document.getElementById('consistent').checked = !!pet.consistentScale;
 
   switchTab('builder');
-  commitHistory();
+  commitHistory('Загрузка питомца');
 
   if (!applied) {
     toast('Не удалось загрузить: файлы фото не найдены', 'err');
@@ -1289,11 +1871,12 @@ async function loadGifFramesForRow(row) {
   const frames = (resp.result && resp.result.frames) || [];
   const t = transforms[row] || {};
   const picked = Array.isArray(t.gifFrames) ? t.gifFrames : null;
+  const autoPick = evenFrameSet(frames);
   gifCandidates = frames.map((f) => ({
     index: f.index,
     thumb: f.thumb,
     duration: f.duration,
-    checked: picked ? picked.includes(f.index) : true,
+    checked: picked ? picked.includes(f.index) : autoPick.has(f.index),
   }));
   if (picked) {
     gifCandidates.sort((a, b) => picked.indexOf(a.index) - picked.indexOf(b.index));
@@ -1361,6 +1944,14 @@ function renderDurations(anim, row) {
 function openAdjust(row) {
   if (!paths[row]) return;
   adjustRow = row;
+  adjustShowCutout = false;
+  adjustCutoutSrc = null;
+  apZoom = 1;
+  apPanX = 0;
+  apPanY = 0;
+  updateApView();
+  const baBtn = document.getElementById('apBeforeAfter');
+  if (baBtn) baBtn.textContent = 'Показать «после»';
   const t = transforms[row] || {};
   document.getElementById('apImg').src = toFileUrl(paths[row]);
   document.getElementById('apScale').value = Math.round((t.scale || 1) * 100);
@@ -1431,6 +2022,11 @@ function stopAdjustAnim() {
   }
 }
 
+function updateApView() {
+  const v = document.getElementById('apViewport');
+  if (v) v.style.transform = `translate(${apPanX}px, ${apPanY}px) scale(${apZoom})`;
+}
+
 function updateAdjustPreview() {
   const scale = parseInt(document.getElementById('apScale').value, 10) / 100;
   document.getElementById('apScaleVal').textContent = Math.round(scale * 100) + '%';
@@ -1456,7 +2052,7 @@ function updateAdjustPreview() {
   img.style.left = `calc(50% + ${adjustDx * W}px)`;
   if (anchor === 'top') {
     img.style.bottom = 'auto';
-    img.style.top = '2px';
+    img.style.top = '4%';
     img.style.transformOrigin = 'top center';
     img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   } else if (anchor === 'center') {
@@ -1466,7 +2062,7 @@ function updateAdjustPreview() {
     img.style.transform = `translateX(-50%) translateY(calc(-50% + ${shift}px)) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   } else {
     img.style.top = 'auto';
-    img.style.bottom = '2px';
+    img.style.bottom = '4%';
     img.style.transformOrigin = 'bottom center';
     img.style.transform = `translateX(-50%) translateY(${shift}px) rotate(${rot}deg) rotate(${adjustRotate}deg) scale(${sx}, ${sy}) ${flip}`;
   }
@@ -1518,11 +2114,13 @@ function saveAdjust() {
       tol: parseInt(document.getElementById('apChromaTol').value, 10) || 30,
     };
     if (gifCandidates.length) {
-      const selected = gifCandidates.filter((c) => c.checked);
-      if (!selected.length) {
+      const checked = gifCandidates.filter((c) => c.checked);
+      if (!checked.length) {
         toast('Выбери хотя бы один кадр GIF', 'err');
         return;
       }
+      const truncated = checked.length > 8;
+      const selected = checked.slice(0, 8);
       const selIdx = selected.map((c) => c.index);
       const allIdx = gifCandidates.map((c) => c.index);
       const isDefaultSel =
@@ -1531,6 +2129,7 @@ function saveAdjust() {
         t.gifFrames = selIdx;
         t.gifDurs = selected.map((c) => c.duration);
       }
+      if (truncated) toast('Взяты первые 8 кадров', '');
     }
   }
   if (isDefaultTransform(t)) delete transforms[adjustRow];
@@ -1540,7 +2139,7 @@ function saveAdjust() {
   document.getElementById('adjustModal').classList.add('hidden');
   adjustRow = null;
   scheduleDraft();
-  commitHistory();
+  commitHistory('Настройка слота');
 }
 
 // ---------- Живой предпросмотр ----------
@@ -1571,10 +2170,18 @@ function gatherPayload() {
         ? 95
         : parseInt(document.getElementById('webpMode').value, 10),
     outDir: outDir || undefined,
+    orcaFps: readOrcaFps(),
+    gifColors: parseInt(document.getElementById('gifColors').value, 10) || 256,
+    gifMaxKb: parseInt(document.getElementById('gifMaxKb').value, 10) || 0,
   };
 }
 
 async function openPreview() {
+  const metaErr = validatePetMeta();
+  if (metaErr) {
+    toast(metaErr, 'err');
+    return;
+  }
   if (!hasBuildable()) {
     toast('Добавь фото хотя бы для одной включённой анимации', 'err');
     return;
@@ -1593,15 +2200,22 @@ async function openPreview() {
   modal.classList.remove('hidden');
   status.classList.remove('hidden');
   status.textContent = 'Сборка…';
+  pvOrcaMode = false;
+  const orcaBtn = document.getElementById('pvOrca');
+  if (orcaBtn) orcaBtn.classList.remove('active');
+  const stageEl = document.getElementById('pvStage');
+  if (stageEl) stageEl.classList.remove('orca-mode');
   sprite.style.backgroundImage = '';
   document.getElementById('pvAnim').innerHTML = '';
   document.getElementById('pvWarnings').classList.add('hidden');
 
+  bpStart(Object.keys(paths).length);
   showProgress();
   const resp = await window.api.preview(payload);
   hideProgress();
   if (!resp.ok || (resp.result && resp.result.error)) {
-    status.textContent = 'Ошибка: ' + (resp.error || resp.result.error);
+    const err = resp.error || resp.result.error;
+    status.textContent = /отмен/i.test(err) ? 'Отменено' : 'Ошибка: ' + err;
     return;
   }
 
@@ -1644,7 +2258,7 @@ function pvRenderFrame() {
   const m = pv.meta;
   const anim = m.animations[pv.animName];
   const idx = pv.frameIndex % anim.frames;
-  const displayH = Math.min(280, petSize || 260);
+  const displayH = pvOrcaMode ? petSize || 260 : Math.min(280, petSize || 260);
   const s = displayH / m.frameHeight;
   const el = document.getElementById('pvSprite');
   el.style.width = m.frameWidth * s + 'px';
@@ -1703,7 +2317,7 @@ function assignGifsByPaths(paths) {
 async function prepareMediaPaths(list) {
   const out = [];
   for (const raw of list || []) {
-    const p = await toGifIfVideo(raw);
+    const p = await toGifIfVideo(raw, { silent: true });
     if (p) out.push(p);
   }
   return out;
@@ -1723,7 +2337,7 @@ function fillFromIdle() {
     }
   }
   if (n) {
-    commitHistory();
+    commitHistory('Заполнить из Idle');
     toast('Заполнено слотов: ' + n, 'ok');
   } else {
     toast('Пустых слотов нет', '');
@@ -1770,10 +2384,30 @@ async function loadBundles() {
     const s = document.createElement('span');
     s.textContent = b.name;
     s.title = b.path;
+    const edit = document.createElement('button');
+    edit.className = 'ghost small';
+    edit.textContent = 'В редактор';
+    edit.addEventListener('click', async () => {
+      const r = await window.api.openBundlePath(b.path);
+      if (!r.ok) {
+        toast('Не удалось открыть bundle: ' + (r.error || ''), 'err');
+        return;
+      }
+      await applyBundleResult(r);
+      document.getElementById('toolsModal').classList.add('hidden');
+    });
     const open = document.createElement('button');
     open.className = 'ghost small';
     open.textContent = 'Открыть';
-    open.addEventListener('click', () => window.api.openDir(b.path));
+    open.addEventListener('click', async () => {
+      const chk = await window.api.checkPaths([b.path]);
+      if (!chk[b.path]) {
+        toast('Папка не найдена — обнови список', 'err');
+        return;
+      }
+      const r = await window.api.openDir(b.path);
+      if (r && !r.ok) toast('Не удалось открыть: ' + (r.error || ''), 'err');
+    });
     const cp = document.createElement('button');
     cp.className = 'ghost small';
     cp.textContent = '⧉';
@@ -1783,6 +2417,7 @@ async function loadBundles() {
       toast('Путь скопирован', 'ok');
     });
     row.appendChild(s);
+    row.appendChild(edit);
     row.appendChild(open);
     row.appendChild(cp);
     el.appendChild(row);
@@ -1801,16 +2436,28 @@ function renderHistory() {
     return;
   }
   el.innerHTML = '';
-  hist.forEach((h) => {
+  hist.slice(0, 5).forEach((h) => {
     const row = document.createElement('div');
-    row.className = 'queue-item';
+    row.className = 'queue-item history-item';
+    const img = document.createElement('img');
+    img.className = 'history-thumb';
+    img.alt = '';
+    const rows = h.project && h.project.rows ? Object.values(h.project.rows) : [];
+    const first = rows.find(Boolean);
+    if (first) img.src = toFileUrl(first);
+    else img.style.display = 'none';
     const s = document.createElement('span');
     const d = new Date(h.t || Date.now());
-    s.textContent = d.toLocaleTimeString() + ' · ' + (h.project && h.project.label ? h.project.label : '');
+    const label = h.label || 'Изменение';
+    const name = h.project && h.project.label ? h.project.label : '';
+    s.textContent =
+      label + ' · ' + d.toLocaleTimeString() + (name ? ' · ' + name : '');
+    s.title = s.textContent;
     const btn = document.createElement('button');
     btn.className = 'ghost small';
     btn.textContent = 'Восстановить';
     btn.addEventListener('click', () => applyProject(h.project));
+    row.appendChild(img);
     row.appendChild(s);
     row.appendChild(btn);
     el.appendChild(row);
@@ -1842,10 +2489,30 @@ async function exportDiagnosticLog() {
   else if (!r.canceled) toast('Ошибка сохранения лога: ' + r.error, 'err');
 }
 
+async function downloadUpdateQuiet(url) {
+  const status = document.getElementById('updateStatus');
+  const dl = document.getElementById('downloadUpdateBtn');
+  const inst = document.getElementById('installUpdateBtn');
+  status.textContent = 'Скачивается обновление…';
+  const r = await window.api.downloadUpdate(url);
+  if (r && r.ok) {
+    pendingUpdatePath = r.path;
+    status.textContent = 'Обновление скачано — можно перезапустить';
+    dl.classList.add('hidden');
+    inst.classList.remove('hidden');
+    toast('Обновление скачано', 'ok');
+  } else {
+    status.textContent = 'Не удалось скачать обновление: ' + ((r && r.error) || '');
+    dl.classList.remove('hidden');
+  }
+}
+
 async function checkUpdates(silent) {
   const status = document.getElementById('updateStatus');
   const dl = document.getElementById('downloadUpdateBtn');
+  const inst = document.getElementById('installUpdateBtn');
   status.textContent = 'Проверка…';
+  inst.classList.add('hidden');
   const r = await window.api.checkUpdate();
   if (!r.configured) {
     status.textContent = 'URL манифеста не задан';
@@ -1861,6 +2528,9 @@ async function checkUpdates(silent) {
     if (r.url) {
       dl.classList.remove('hidden');
       dl.dataset.url = r.url;
+      if (silent && document.getElementById('updateAuto').checked) {
+        downloadUpdateQuiet(r.url);
+      }
     }
     if (!silent) toast('Доступно обновление ' + r.latest, 'ok');
   } else {
@@ -1875,6 +2545,137 @@ async function initUpdates() {
   if (cfg.auto !== false && cfg.url) checkUpdates(true);
 }
 
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024) return v + ' Б';
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' КБ';
+  if (v < 1024 * 1024 * 1024) return (v / (1024 * 1024)).toFixed(1) + ' МБ';
+  return (v / (1024 * 1024 * 1024)).toFixed(2) + ' ГБ';
+}
+
+async function refreshCacheInfo() {
+  const el = document.getElementById('cacheInfo');
+  if (!el) return;
+  const r = await window.api.cacheInfo();
+  if (!r.ok || !r.result) {
+    el.textContent = 'Не удалось получить размер кэша';
+    return;
+  }
+  const it = r.result.items || {};
+  const names = {
+    cutouts: 'вырезание',
+    gifcache: 'кадры GIF',
+    videocache: 'видео',
+    previews: 'превью',
+  };
+  const parts = Object.keys(names)
+    .map((k) => names[k] + ': ' + fmtBytes(it[k] || 0))
+    .join(' · ');
+  el.textContent = 'Всего ' + fmtBytes(r.result.total) + ' — ' + parts;
+}
+
+const PRESETS_KEY = 'psb.presets';
+
+function loadPresets() {
+  try {
+    return JSON.parse(localStorage.getItem(PRESETS_KEY) || '{}') || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function savePresets(all) {
+  try {
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(all));
+  } catch (_) {}
+}
+
+function renderPresetList(selected) {
+  const sel = document.getElementById('presetList');
+  if (!sel) return;
+  const all = loadPresets();
+  const names = Object.keys(all).sort((a, b) => a.localeCompare(b));
+  sel.innerHTML = '';
+  if (!names.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = 'Пока нет';
+    sel.appendChild(o);
+    return;
+  }
+  for (const n of names) {
+    const o = document.createElement('option');
+    o.value = n;
+    o.textContent = n;
+    sel.appendChild(o);
+  }
+  if (selected && names.includes(selected)) sel.value = selected;
+}
+
+function applyBgToUi(bg) {
+  bg = bg || {};
+  document.getElementById('bgAlpha').checked = !!bg.alphaMatting;
+  document.getElementById('bgFg').value = bg.fgThreshold || 240;
+  document.getElementById('bgBg').value = bg.bgThreshold || 10;
+  document.getElementById('bgErode').value = bg.erode || 10;
+  if (document.getElementById('bgFeather')) document.getElementById('bgFeather').value = bg.feather || 0;
+  const ch = bg.chroma || {};
+  document.getElementById('chromaOn').checked = !!ch.enabled;
+  document.getElementById('chromaColor').value = rgbToHex(ch.r ?? 255, ch.g ?? 255, ch.b ?? 255);
+  document.getElementById('chromaTol').value = ch.tol || 30;
+  const sel = document.getElementById('bgModel');
+  const name = bg.model || '';
+  if (name) {
+    if (Array.from(sel.options).some((o) => o.value === name)) sel.value = name;
+    else pendingBgModel = name;
+  }
+}
+
+function savePresetFromUi() {
+  const name = (document.getElementById('presetName').value || '').trim();
+  if (!name) {
+    toast('Введи название пресета', 'err');
+    return;
+  }
+  const all = loadPresets();
+  all[name] = {
+    bg: gatherBg(),
+    frameWidth: parseInt(document.getElementById('frameW').value, 10) || 384,
+    frameHeight: parseInt(document.getElementById('frameH').value, 10) || 416,
+    consistentScale: document.getElementById('consistent').checked,
+    webpMode: document.getElementById('webpMode').value,
+  };
+  savePresets(all);
+  renderPresetList(name);
+  toast('Пресет сохранён: ' + name, 'ok');
+}
+
+function applyPresetFromUi() {
+  const name = document.getElementById('presetList').value;
+  const p = loadPresets()[name];
+  if (!p) {
+    toast('Выбери пресет', 'err');
+    return;
+  }
+  applyBgToUi(p.bg);
+  if (p.frameWidth) document.getElementById('frameW').value = p.frameWidth;
+  if (p.frameHeight) document.getElementById('frameH').value = p.frameHeight;
+  document.getElementById('consistent').checked = p.consistentScale !== false;
+  if (p.webpMode) document.getElementById('webpMode').value = p.webpMode;
+  scheduleDraft();
+  toast('Применён пресет: ' + name, 'ok');
+}
+
+function deletePresetFromUi() {
+  const name = document.getElementById('presetList').value;
+  if (!name) return;
+  const all = loadPresets();
+  delete all[name];
+  savePresets(all);
+  renderPresetList();
+  toast('Пресет удалён: ' + name, 'ok');
+}
+
 function init() {
   const grid = document.getElementById('grid');
   for (const anim of ANIMS) {
@@ -1886,14 +2687,6 @@ function init() {
   for (const b of document.querySelectorAll('.tab')) {
     b.addEventListener('click', () => switchTab(b.dataset.tab));
   }
-  // Скрытие/показ сайдбара
-  const layoutEl = document.getElementById('panel-builder');
-  if (localStorage.getItem('psb.sidebar') === 'hidden') layoutEl.classList.add('sidebar-hidden');
-  document.getElementById('toggleSidebar').addEventListener('click', () => {
-    const hidden = layoutEl.classList.toggle('sidebar-hidden');
-    localStorage.setItem('psb.sidebar', hidden ? 'hidden' : 'shown');
-  });
-
   // Пресеты размера кадра
   const presetSel = document.getElementById('framePreset');
   const fwEl = document.getElementById('frameW');
@@ -1916,71 +2709,143 @@ function init() {
   updateSlotCount();
 
   document.getElementById('refreshPets').addEventListener('click', loadPets);
+  document.getElementById('petsOpenBundle').addEventListener('click', importBundleHandler);
   document.getElementById('petsSearch').addEventListener('input', renderPetsFiltered);
 
   document.getElementById('saveProjectBtn').addEventListener('click', saveProject);
+  document.getElementById('bgModelDownloadBtn').addEventListener('click', downloadBgModelFromUi);
+  document.getElementById('bgModelInstalled').addEventListener('change', updateInstalledModelInfo);
+  document.getElementById('bgModelDeleteBtn').addEventListener('click', deleteBgModelFromUi);
   document.getElementById('bgClearCache').addEventListener('click', async () => {
     const r = await window.api.clearCutouts();
     if (r.ok) toast('Кэш вырезаний очищен: ' + ((r.result && r.result.removed) || 0), 'ok');
     else toast('Ошибка очистки кэша', 'err');
   });
-  document.getElementById('bgCompareBtn').addEventListener('click', compareCutout);
+  document.getElementById('bgCompareBtn').addEventListener('click', () => compareCutout(hoverRow));
   document.getElementById('cutoutClose').addEventListener('click', () =>
     document.getElementById('cutoutModal').classList.add('hidden')
   );
-  document.getElementById('importBundleBtn').addEventListener('click', importBundleHandler);
-  document.getElementById('gifStatesBtn').addEventListener('click', () => {
-    renderGifStates();
-    document.getElementById('gifStatus').textContent = '';
-    document.getElementById('gifModal').classList.remove('hidden');
-  });
-  document.getElementById('gifClose').addEventListener('click', () =>
-    document.getElementById('gifModal').classList.add('hidden')
-  );
-  document.getElementById('gifBuild').addEventListener('click', buildGifBundle);
-  document.getElementById('gifMultiBtn').addEventListener('click', async () => {
-    const list = await window.api.selectImages();
-    const ready = await prepareMediaPaths(list);
-    if (ready.length) {
-      assignGifsByPaths(ready);
-      renderGifStates();
+  document.getElementById('fillIdleBtn').addEventListener('click', fillFromIdle);
+  document.getElementById('recentsClear').addEventListener('click', async () => {
+    if (!recents.length) {
+      toast('Недавних фото нет', '');
+      return;
+    }
+    if (!confirm('Очистить список недавних фото?')) return;
+    const r = await window.api.clearRecents();
+    if (r.ok) {
+      toast('Недавние фото очищены', 'ok');
+      await loadRecents();
+    } else {
+      toast('Не удалось очистить: ' + (r.error || ''), 'err');
     }
   });
-  (() => {
-    const gs = document.getElementById('gifStates');
-    gs.addEventListener('dragover', (e) => e.preventDefault());
-    gs.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      const paths = Array.from(e.dataTransfer.files || [])
-        .map((f) => window.api.pathForFile(f))
-        .filter(Boolean);
-      const ready = await prepareMediaPaths(paths);
-      if (ready.length) {
-        assignGifsByPaths(ready);
-        renderGifStates();
+  document.getElementById('fitAllBtn').addEventListener('click', () => {
+    let n = 0;
+    for (const anim of ANIMS) {
+      if (!paths[anim.row]) continue;
+      const t = transforms[anim.row] ? JSON.parse(JSON.stringify(transforms[anim.row])) : {};
+      t.scale = 1;
+      t.stretchX = 1;
+      t.stretchY = 1;
+      t.dx = 0;
+      t.dy = 0;
+      delete t.crop;
+      if (isDefaultTransform(t)) delete transforms[anim.row];
+      else transforms[anim.row] = t;
+      if (cardByRow[anim.row] && cardByRow[anim.row].updateTune) {
+        cardByRow[anim.row].updateTune();
       }
-    });
-  })();
-  document.getElementById('fillIdleBtn').addEventListener('click', fillFromIdle);
+      n++;
+    }
+    if (!n) {
+      toast('Нет слотов для выравнивания', 'err');
+      return;
+    }
+    scheduleDraft();
+    commitHistory('Вписать в безопасную зону');
+    toast('Вписано в безопасную зону: ' + n, 'ok');
+  });
   document.getElementById('zipBtn').addEventListener('click', zipBundle);
-  document.getElementById('bundlesBtn').addEventListener('click', loadBundles);
-  document.getElementById('refreshBundles').addEventListener('click', loadBundles);
-  document.getElementById('toolsBtn').addEventListener('click', () => document.getElementById('toolsModal').classList.remove('hidden'));
+  document.getElementById('toolsBtn').addEventListener('click', () => {
+    document.getElementById('toolsModal').classList.remove('hidden');
+    refreshCacheInfo();
+    renderPresetList();
+  });
   document.getElementById('toolsClose').addEventListener('click', () => document.getElementById('toolsModal').classList.add('hidden'));
+  document.getElementById('cacheRefresh').addEventListener('click', refreshCacheInfo);
+  document.getElementById('cacheClear').addEventListener('click', async () => {
+    const r = await window.api.clearCache({});
+    if (r.ok && r.result) toast('Очищено файлов: ' + (r.result.removed || 0), 'ok');
+    else toast('Не удалось очистить кэш: ' + ((r && r.error) || ''), 'err');
+    refreshCacheInfo();
+  });
+  document.getElementById('presetSave').addEventListener('click', savePresetFromUi);
+  document.getElementById('presetApply').addEventListener('click', applyPresetFromUi);
+  document.getElementById('presetDelete').addEventListener('click', deletePresetFromUi);
   document.getElementById('exportLogBtn').addEventListener('click', exportDiagnosticLog);
   document.getElementById('checkUpdateBtn').addEventListener('click', () => checkUpdates(false));
   document.getElementById('whatsNewBtn').addEventListener('click', () => showWhatsNew());
   document.getElementById('whatsNewClose').addEventListener('click', () =>
     document.getElementById('whatsNewModal').classList.add('hidden')
   );
+  document.getElementById('apAutoAnim').addEventListener('click', async () => {
+    if (adjustRow == null || !paths[adjustRow]) return;
+    showProgress();
+    const resp = await window.api.photoToGif({
+      path: paths[adjustRow],
+      frames: 10,
+      amplitude: 3,
+      maxSize: Math.max(
+        parseInt(document.getElementById('frameW').value, 10) || 384,
+        parseInt(document.getElementById('frameH').value, 10) || 416
+      ),
+    });
+    hideProgress();
+    if (!resp.ok || !resp.result || !resp.result.gif) {
+      toast('Не удалось создать анимацию: ' + ((resp && resp.error) || ''), 'err');
+      return;
+    }
+    const row = adjustRow;
+    delete transforms[row];
+    const gif = (await window.api.importFile(resp.result.gif)) || resp.result.gif;
+    cardByRow[row].setPath(gif, { preserve: true });
+    document.getElementById('adjustModal').classList.add('hidden');
+    adjustRow = null;
+    updateSlotCount();
+    scheduleDraft();
+    commitHistory('Автоанимация');
+    toast('Автоанимация готова', 'ok');
+  });
+  document.getElementById('bpCancel').addEventListener('click', async () => {
+    bpUpdate('Отмена…', 0);
+    await window.api.cancelBuild();
+  });
+  for (const id of ['vidFps', 'vidSize', 'vidStart', 'vidEnd', 'vidBoom']) {
+    const el = document.getElementById(id);
+    el.addEventListener('input', scheduleVideoPreview);
+    el.addEventListener('change', scheduleVideoPreview);
+  }
+  document.getElementById('vidCancel').addEventListener('click', () => closeVideoModal(null));
+  document.getElementById('vidOk').addEventListener('click', () => closeVideoModal(readVideoOptsFromUi()));
   document.getElementById('downloadUpdateBtn').addEventListener('click', async (e) => {
     const url = e.currentTarget.dataset.url;
     if (!url) return;
     showProgress();
     const r = await window.api.downloadUpdate(url);
     hideProgress();
-    if (r.ok) toast('Запускаю установщик обновления', 'ok');
-    else toast('Ошибка загрузки: ' + r.error, 'err');
+    if (!r.ok) {
+      toast('Ошибка загрузки: ' + r.error, 'err');
+      return;
+    }
+    pendingUpdatePath = r.path;
+    const inst = await window.api.installUpdate(r.path);
+    if (!inst.ok) toast('Не удалось запустить установщик: ' + inst.error, 'err');
+  });
+  document.getElementById('installUpdateBtn').addEventListener('click', async () => {
+    if (!pendingUpdatePath) return;
+    const r = await window.api.installUpdate(pendingUpdatePath);
+    if (!r.ok) toast('Не удалось запустить установщик: ' + r.error, 'err');
   });
   const saveUpdateCfg = () =>
     window.api.setUpdateConfig({
@@ -1989,6 +2854,35 @@ function init() {
     });
   document.getElementById('updateAuto').addEventListener('change', saveUpdateCfg);
   renderAnimOptions();
+  document.getElementById('resetSettingsBtn').addEventListener('click', async () => {
+    if (!confirm('Сбросить настройки приложения (пресеты, историю, настройки видео) и черновик?')) return;
+    try {
+      localStorage.removeItem('psb.presets');
+      localStorage.removeItem('psb.history');
+      localStorage.removeItem('psb.videoOpts');
+    } catch (_) {}
+    await window.api.clearDraft();
+    document.getElementById('frameW').value = 384;
+    document.getElementById('frameH').value = 416;
+    document.getElementById('label').value = 'My Pet';
+    document.getElementById('petId').value = '';
+    document.getElementById('consistent').checked = true;
+    document.getElementById('snapFps').checked = true;
+    document.getElementById('orcaFps').value = 8;
+    document.getElementById('bgAlpha').checked = false;
+    document.getElementById('bgFg').value = 240;
+    document.getElementById('bgBg').value = 10;
+    document.getElementById('bgErode').value = 10;
+    document.getElementById('bgFeather').value = 0;
+    document.getElementById('chromaOn').checked = false;
+    document.getElementById('webpMode').value = 'lossless';
+    document.getElementById('gifColors').value = '256';
+    document.getElementById('gifMaxKb').value = 0;
+    renderPresetList();
+    renderHistory();
+    scheduleDraft();
+    toast('Настройки сброшены', 'ok');
+  });
   document.getElementById('openProjectBtn').addEventListener('click', async () => {
     const r = await window.api.openProject();
     if (r.ok) await applyProject(r.project);
@@ -1997,7 +2891,8 @@ function init() {
 
   for (const id of [
     'frameW', 'frameH', 'label', 'petId', 'consistent',
-    'bgFg', 'bgBg', 'bgErode', 'chromaOn', 'chromaColor', 'chromaTol', 'webpMode',
+    'bgFg', 'bgBg', 'bgErode', 'bgFeather', 'chromaOn', 'chromaColor', 'chromaTol', 'webpMode',
+    'gifColors', 'gifMaxKb', 'snapFps', 'orcaFps',
   ]) {
     document.getElementById(id).addEventListener('input', scheduleDraft);
     document.getElementById(id).addEventListener('change', scheduleDraft);
@@ -2013,6 +2908,10 @@ function init() {
     }
   });
 
+  window.api.onRequestSaveClose(async () => {
+    const ok = await saveProject();
+    if (ok) await window.api.confirmClose();
+  });
   window.api.onLog(appendLog);
   window.api.onCutoutLog((line) => {
     appendLog(line);
@@ -2071,11 +2970,38 @@ function init() {
     document.getElementById(id).addEventListener('input', updateAdjustPreview);
   }
   document.getElementById('apSave').addEventListener('click', saveAdjust);
-  document.getElementById('apCancel').addEventListener('click', () => {
+  const closeAdjust = () => {
     stopAdjustAnim();
     document.getElementById('adjustModal').classList.add('hidden');
     adjustRow = null;
+  };
+  document.getElementById('apCancel').addEventListener('click', closeAdjust);
+  document.getElementById('apBeforeAfter').addEventListener('click', async () => {
+    if (adjustRow == null || !paths[adjustRow]) return;
+    const btn = document.getElementById('apBeforeAfter');
+    if (adjustShowCutout) {
+      document.getElementById('apImg').src = toFileUrl(paths[adjustRow]);
+      adjustShowCutout = false;
+      btn.textContent = 'Показать «после»';
+      return;
+    }
+    showProgress();
+    const resp = await window.api.cutoutPreview({
+      path: paths[adjustRow],
+      bg: gatherBg(),
+    });
+    hideProgress();
+    if (!resp.ok || !resp.result) {
+      toast('Не удалось вырезать фон: ' + ((resp && resp.error) || ''), 'err');
+      return;
+    }
+    adjustCutoutSrc = resp.result.cutout;
+    document.getElementById('apImg').src = toFileUrl(adjustCutoutSrc);
+    adjustShowCutout = true;
+    btn.textContent = 'Показать оригинал';
+    if (isAnimatedPath(paths[adjustRow])) toast('Для GIF показан первый кадр', '');
   });
+  document.getElementById('apCloseX').addEventListener('click', closeAdjust);
   document.getElementById('apReset').addEventListener('click', () => {
     document.getElementById('apScale').value = 100;
     adjustDx = 0;
@@ -2166,12 +3092,50 @@ function init() {
     return 'ns-resize';
   }
 
+  apFrame.addEventListener(
+    'wheel',
+    (e) => {
+      if (adjustRow == null) return;
+      e.preventDefault();
+      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      apZoom = Math.min(5, Math.max(1, apZoom * f));
+      updateApView();
+    },
+    { passive: false }
+  );
+
+  window.addEventListener(
+    'keydown',
+    (e) => {
+      const modal = document.getElementById('adjustModal');
+      if (!modal || modal.classList.contains('hidden') || adjustRow == null) return;
+      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+      e.preventDefault();
+      e.stopPropagation();
+    const W = apFrame.clientWidth || 1;
+    const H = apFrame.clientHeight || 1;
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === 'ArrowLeft') adjustDx -= step / W;
+    else if (e.key === 'ArrowRight') adjustDx += step / W;
+    else if (e.key === 'ArrowUp') adjustDy -= step / H;
+    else if (e.key === 'ArrowDown') adjustDy += step / H;
+      updateAdjustPreview();
+      scheduleDraft();
+    },
+    true
+  );
+
   apFrame.addEventListener('pointerdown', (e) => {
     if (!adjustRow && adjustRow !== 0) return;
     e.preventDefault();
     try {
       apFrame.setPointerCapture(e.pointerId);
     } catch (_) {}
+    if (e.button === 1) {
+      apDrag = { mode: 'pan', x: e.clientX, y: e.clientY, px: apPanX, py: apPanY };
+      apFrame.classList.add('dragging');
+      return;
+    }
     const edges = resizeEdgesAt(e);
     if (edges) {
       const img = document.getElementById('apImg');
@@ -2197,6 +3161,12 @@ function init() {
     if (!apDrag) {
       const edges = resizeEdgesAt(e);
       apFrame.style.cursor = edges ? resizeCursor(edges) : 'grab';
+      return;
+    }
+    if (apDrag.mode === 'pan') {
+      apPanX = apDrag.px + (e.clientX - apDrag.x);
+      apPanY = apDrag.py + (e.clientY - apDrag.y);
+      updateApView();
       return;
     }
     if (apDrag.mode === 'resize') {
@@ -2270,6 +3240,56 @@ function init() {
       .getElementById('pvFrameLine')
       .classList.toggle('show', document.getElementById('pvGrid').checked);
   });
+  document.getElementById('pvOrca').addEventListener('click', () => {
+    pvOrcaMode = !pvOrcaMode;
+    document.getElementById('pvOrca').classList.toggle('active', pvOrcaMode);
+    document.getElementById('pvStage').classList.toggle('orca-mode', pvOrcaMode);
+    if (pv) pvRenderFrame();
+  });
+  document.getElementById('pvOverlay').addEventListener('click', async () => {
+    if (!pv) {
+      toast('Сначала открой предпросмотр', 'err');
+      return;
+    }
+    const m = pv.meta;
+    const r = await window.api.showOverlay({
+      previewPath: m.previewPath,
+      frameWidth: m.frameWidth,
+      frameHeight: m.frameHeight,
+      sheetWidth: m.sheetWidth,
+      sheetHeight: m.sheetHeight,
+      animations: m.animations,
+      animation: pv.animName,
+      defaultAnimation: m.defaultAnimation,
+      petSize: petSize || m.frameHeight,
+    });
+    if (!r.ok) toast('Не удалось открыть оверлей: ' + (r.error || ''), 'err');
+    else toast('Оверлей открыт (крестик в углу — закрыть)', 'ok');
+  });
+  document.getElementById('pvEstimate').addEventListener('click', async () => {
+    if (!pv) {
+      toast('Сначала открой предпросмотр', 'err');
+      return;
+    }
+    const el = document.getElementById('pvSizes');
+    el.textContent = 'Считаю размер…';
+    bpStart(Object.keys(paths).length);
+    showProgress();
+    const r = await window.api.estimate(gatherPayload());
+    hideProgress();
+    if (!r.ok || !r.result) {
+      el.textContent = 'Не удалось оценить: ' + ((r && r.error) || '');
+      return;
+    }
+    const res = r.result;
+    const gifParts = Object.keys(res.gifs || {})
+      .map((k) => k + ': ' + fmtBytes(res.gifs[k]))
+      .join(', ');
+    el.textContent =
+      'WebP ~' + fmtBytes(res.webpBytes) +
+      ' · PNG ~' + fmtBytes(res.pngBytes) +
+      (gifParts ? ' · GIF: ' + gifParts : '');
+  });
   document.getElementById('pvGif').addEventListener('click', () => exportAnim('gif'));
   document.getElementById('pvApng').addEventListener('click', () => exportAnim('apng'));
 
@@ -2297,12 +3317,38 @@ function init() {
   (async () => {
     await loadBgModels();
     const d = await window.api.loadDraft();
-    if (d && d.rows) await applyProject(d, { silent: true });
+    if (d && d.rows && Object.keys(d.rows).length) {
+      await applyProject(d, { silent: true });
+      toast('Восстановлен несохранённый черновик', 'ok');
+    }
+    window.api.setDirty(false);
     historyReset();
   })();
 }
 
+function validatePetMeta() {
+  const label = (document.getElementById('label').value || '').trim();
+  if (!label) return 'Укажи имя питомца';
+  if (label.length > 60) return 'Имя слишком длинное (максимум 60 символов)';
+  if (/[<>:"/\|?* -]/.test(label)) {
+    return 'Имя содержит недопустимые символы: < > : " / \ | ? *';
+  }
+  const id = (document.getElementById('petId').value || '').trim();
+  if (id) {
+    if (!/^[0-9a-fA-F-]{8,64}$/.test(id)) {
+      return 'ID должен содержать только латиницу, цифры и дефис (UUID)';
+    }
+  }
+  return null;
+}
+
 async function build() {
+  const metaErr = validatePetMeta();
+  if (metaErr) {
+    toast(metaErr, 'err');
+    appendLog('Проверка имени/ID: ' + metaErr);
+    return;
+  }
   if (!hasBuildable()) {
     toast('Добавь фото хотя бы для одной включённой анимации', 'err');
     return;
@@ -2317,14 +3363,20 @@ async function build() {
   const btn = document.getElementById('buildBtn');
   btn.disabled = true;
   btn.textContent = 'Собираю…';
+  bpStart(Object.keys(paths).length);
   showProgress();
   setLog('Запуск бэкенда…');
 
   try {
     const resp = await window.api.build(payload);
     if (!resp.ok) {
-      toast('Ошибка сборки', 'err');
-      appendLog(resp.error || 'неизвестная ошибка');
+      if (/отмен/i.test(resp.error || '')) {
+        toast('Сборка отменена', '');
+        appendLog('Сборка отменена');
+      } else {
+        toast('Ошибка сборки', 'err');
+        appendLog(resp.error || 'неизвестная ошибка');
+      }
     } else if (resp.result && resp.result.error) {
       toast('Ошибка сборки', 'err');
       appendLog(resp.result.error);

@@ -89,6 +89,132 @@ def cutout_cache_path(path, extra=""):
     return os.path.join(d, key + ".png")
 
 
+def ensure_rembg_pkg():
+    """Регистрирует пакет rembg без выполнения тяжёлого __init__ (pymatting/numba)."""
+    import importlib.util
+    import types
+
+    if "rembg" in sys.modules:
+        return
+    spec = importlib.util.find_spec("rembg")
+    pkg = types.ModuleType("rembg")
+    pkg.__path__ = list(getattr(spec, "submodule_search_locations", None) or [])
+    pkg.__package__ = "rembg"
+    sys.modules["rembg"] = pkg
+
+
+def downloadable_bg_models():
+    try:
+        ensure_rembg_pkg()
+        from rembg.sessions import sessions_class
+
+        out = []
+        for cls in sessions_class:
+            try:
+                if cls.requires_credentials():
+                    continue
+                name = cls.name()
+            except Exception:
+                continue
+            if name.endswith("_custom") or name == "dis_custom":
+                continue
+            out.append(name)
+        return sorted(set(out))
+    except Exception as e:
+        log(f"downloadable_bg_models: {e!r}")
+        return []
+
+
+def _repair_permissions(path):
+    """Пытается вернуть доступ к папке после прерванной загрузки."""
+    import subprocess as _sp
+
+    flags = getattr(_sp, "CREATE_NO_WINDOW", 0)
+    user = os.environ.get("USERNAME") or ""
+    cmds = [
+        ["takeown", "/f", path, "/r", "/d", "y"],
+        ["icacls", path, "/reset", "/T", "/C"],
+    ]
+    if user:
+        cmds.append(["icacls", path, "/grant", f"{user}:(OI)(CI)F", "/T", "/C"])
+    for cmd in cmds:
+        try:
+            _sp.run(cmd, capture_output=True, creationflags=flags, timeout=120)
+        except Exception:
+            pass
+
+
+def _ensure_writable_dir(path):
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError:
+        log(f"Папка {path} недоступна, восстанавливаю права…")
+        _repair_permissions(path)
+        try:
+            import shutil as _shutil
+
+            if os.path.isdir(path):
+                _shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+        time.sleep(0.4)
+        os.makedirs(path, exist_ok=True)
+    probe = os.path.join(path, ".write-test")
+    try:
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+    except OSError:
+        _repair_permissions(path)
+        time.sleep(0.4)
+        with open(probe, "w", encoding="utf-8") as f:
+            f.write("ok")
+        os.remove(probe)
+
+
+def download_bg_model(payload):
+    name = (payload.get("model") or "").strip()
+    if not name:
+        raise RuntimeError("Не указана модель")
+    ensure_rembg_pkg()
+    from rembg.session_factory import new_session
+
+    base = models_dir()
+    target = os.path.join(base, name)
+
+    def prepare():
+        os.makedirs(base, exist_ok=True)
+        _ensure_writable_dir(target)
+
+    try:
+        prepare()
+    except Exception as e:
+        raise RuntimeError(
+            f"Нет доступа к папке модели {target}: {e}. "
+            "Закрой программу, удали эту папку и попробуй снова."
+        )
+
+    log(f"Скачивание модели «{name}»…")
+    try:
+        new_session(name)
+    except PermissionError:
+        # Иногда папка осталась с неверными правами от прерванной загрузки.
+        try:
+            import shutil as _shutil
+
+            if os.path.isdir(target) and not os.listdir(target):
+                _shutil.rmtree(target, ignore_errors=True)
+            prepare()
+            new_session(name)
+        except Exception as e:
+            raise RuntimeError(
+                f"Не удалось скачать модель «{name}»: {e}. "
+                f"Удалите папку {target} и попробуйте снова."
+            )
+    log(f"Модель «{name}» готова")
+    return {"model": name}
+
+
 def new_rembg_session(model=""):
     """Создаёт сессию rembg без импорта rembg.bg (pymatting → numba).
 
@@ -96,15 +222,7 @@ def new_rembg_session(model=""):
     может компилироваться несколько минут. Для обычного вырезания (без alpha
     matting) достаточно session_factory — он лёгкий.
     """
-    import importlib.util
-    import types
-
-    if "rembg" not in sys.modules:
-        spec = importlib.util.find_spec("rembg")
-        pkg = types.ModuleType("rembg")
-        pkg.__path__ = list(getattr(spec, "submodule_search_locations", None) or [])
-        pkg.__package__ = "rembg"
-        sys.modules["rembg"] = pkg
+    ensure_rembg_pkg()
     from rembg.session_factory import new_session
 
     return new_session() if not model else new_session(model)
@@ -132,8 +250,13 @@ def remove_bg_fast(im, session, bg):
 
     img = ImageOps.exif_transpose(im).convert("RGBA")
     masks = session.predict(img)
+    feather = int(bg.get("feather") or 0)
     cutouts = []
     for mask in masks or []:
+        if feather > 0:
+            from PIL import ImageFilter
+
+            mask = mask.filter(ImageFilter.GaussianBlur(radius=min(6, feather)))
         empty = Image.new("RGBA", img.size, 0)
         cutouts.append(Image.composite(img, empty, mask))
     if not cutouts:
@@ -150,6 +273,47 @@ def remove_bg_fast(im, session, bg):
     return res
 
 
+def smooth_masks(masks, alpha=0.55):
+    """Временное сглаживание масок: убирает дрожание вырезания между кадрами."""
+    import numpy as np
+
+    out = []
+    prev = None
+    for m in masks:
+        cur = np.asarray(m.convert("L"), dtype=np.float32)
+        if prev is None:
+            merged = cur
+        else:
+            merged = alpha * cur + (1.0 - alpha) * prev
+        prev = merged
+        out.append(merged.clip(0, 255).astype("uint8"))
+    return out
+
+
+def composite_mask(img, mask_arr):
+    from PIL import Image as _Image
+
+    empty = _Image.new("RGBA", img.size, 0)
+    mask = _Image.fromarray(mask_arr, "L")
+    return _Image.composite(img, empty, mask)
+
+
+def snap_to_fps(durs, fps):
+    """Округляет длительности кадров до кратных 1000/fps (тики Orca)."""
+    try:
+        fps = int(fps or 0)
+    except (TypeError, ValueError):
+        fps = 0
+    if fps <= 0:
+        return [max(20, int(d)) for d in durs]
+    tick = 1000.0 / fps
+    out = []
+    for d in durs:
+        n = max(1, int(round(float(d) / tick)))
+        out.append(max(20, int(round(n * tick))))
+    return out
+
+
 def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=None, bg=None, rotate=0, crop=None, stretch_x=1.0, stretch_y=1.0):
     bg = bg or {}
     model = bg.get("model") or ""
@@ -157,7 +321,8 @@ def prepare(path, frame_w, frame_h, consistent=False, scale=1.0, session_box=Non
     fg = int(bg.get("fgThreshold") or 240)
     bgt = int(bg.get("bgThreshold") or 10)
     erode = int(bg.get("erode") or 10)
-    extra = f"{model or 'default'}|{int(alpha)}|{fg}|{bgt}|{erode}"
+    feather = int(bg.get("feather") or 0)
+    extra = f"{model or 'default'}|{int(alpha)}|{fg}|{bgt}|{erode}|{feather}"
     cached = cutout_cache_path(path, extra)
     if os.path.exists(cached):
         im = Image.open(cached).convert("RGBA")
@@ -219,6 +384,7 @@ def build_sheet(
     bg=None,
     disabled=None,
     anim_options=None,
+    snap_fps=0,
 ):
     transforms = transforms or {}
     disabled = set(disabled or [])
@@ -263,6 +429,7 @@ def build_sheet(
             custom_durs = t.get("gifDurs")
             if isinstance(custom_durs, list) and len(custom_durs) == len(gframes):
                 gdurs = [max(40, int(x)) for x in custom_durs]
+            gdurs = snap_to_fps(gdurs, snap_fps)
             if flip:
                 gframes = [f.transpose(Image.FLIP_LEFT_RIGHT) for f in gframes]
             chroma = t.get("chroma") or (bg or {}).get("chroma")
@@ -385,7 +552,9 @@ def build_sheet(
         animations[name] = {
             "row": row,
             "frames": frames,
-            "frameDurationsMs": anim_durations(name, anim_options, frames),
+            "frameDurationsMs": snap_to_fps(
+                anim_durations(name, anim_options, frames), snap_fps
+            ),
         }
         log(f"{name}: готово за {round(time.time() - row_t, 1)} с")
 
@@ -603,6 +772,48 @@ def models_dir():
     return os.path.join(os.path.expanduser("~"), ".rembg", "models")
 
 
+def _tree_size(path):
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except Exception:
+                pass
+    return total
+
+
+def models_info():
+    base = models_dir()
+    items = []
+    total = 0
+    if os.path.isdir(base):
+        for n in sorted(os.listdir(base)):
+            d = os.path.join(base, n)
+            if not os.path.isdir(d):
+                continue
+            size = _tree_size(d)
+            items.append({"name": n, "bytes": size})
+            total += size
+    return {"models": items, "total": total, "path": base}
+
+
+def delete_bg_model(payload):
+    import shutil as _shutil
+
+    name = (payload.get("model") or "").strip()
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise RuntimeError("Некорректное имя модели")
+    base = os.path.abspath(models_dir())
+    target = os.path.abspath(os.path.join(base, name))
+    if os.path.dirname(target) != base or not os.path.isdir(target):
+        raise RuntimeError("Модель не найдена")
+    freed = _tree_size(target)
+    _shutil.rmtree(target, ignore_errors=True)
+    log(f"Модель удалена: {name}")
+    return {"removed": name, "freedBytes": freed}
+
+
 def list_bg_models():
     base = models_dir()
     names = []
@@ -617,7 +828,18 @@ def list_bg_models():
             break
     else:
         default = "bria-rmbg" if "bria-rmbg" in names else (names[0] if names else "")
-    return {"models": names, "default": default}
+    sizes = {}
+    for n in names:
+        try:
+            sizes[n] = _tree_size(os.path.join(base, n))
+        except Exception:
+            sizes[n] = 0
+    return {
+        "models": names,
+        "default": default,
+        "downloadable": downloadable_bg_models(),
+        "sizes": sizes,
+    }
 
 
 def clear_cutouts():
@@ -634,7 +856,152 @@ def clear_cutouts():
     return {"removed": n}
 
 
-def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, anim_options=None):
+CACHE_DIRS = ("cutouts", "gifcache", "videocache", "previews")
+
+
+def _cache_root():
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return os.path.join(base, "PetSpriteBuilder")
+
+
+def _dir_size(d):
+    total = 0
+    try:
+        for f in os.listdir(d):
+            fp = os.path.join(d, f)
+            if os.path.isfile(fp):
+                try:
+                    total += os.path.getsize(fp)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total
+
+
+def cache_info():
+    root = _cache_root()
+    items = {}
+    total = 0
+    for name in CACHE_DIRS:
+        d = os.path.join(root, name)
+        size = _dir_size(d) if os.path.isdir(d) else 0
+        items[name] = size
+        total += size
+    return {"items": items, "total": total, "path": root}
+
+
+def clear_cache(payload):
+    root = _cache_root()
+    kinds = payload.get("kinds") or list(CACHE_DIRS)
+    removed = 0
+    for name in kinds:
+        if name not in CACHE_DIRS:
+            continue
+        d = os.path.join(root, name)
+        if not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            fp = os.path.join(d, f)
+            if os.path.isfile(fp):
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except Exception:
+                    pass
+    return {"removed": removed}
+
+
+def dedupe_gif_frames(imgs, durs):
+    """Убирает подряд идущие одинаковые кадры, суммируя их длительности."""
+    out = []
+    out_durs = []
+    out_raw = []
+    for im, d in zip(imgs, durs):
+        raw = im.tobytes()
+        if out and raw == out_raw[-1]:
+            out_durs[-1] += int(d)
+            continue
+        out.append(im)
+        out_raw.append(raw)
+        out_durs.append(int(d))
+    return out, out_durs
+
+
+def _save_gif_frames(frames, durs, path, colors=256):
+    seq = frames
+    if colors and colors < 256:
+        opaque = all(
+            f.convert("RGBA").getchannel("A").getextrema()[0] == 255 for f in frames
+        )
+        if opaque:
+            seq = [
+                f.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=colors)
+                for f in frames
+            ]
+    seq[0].save(
+        path,
+        save_all=True,
+        append_images=seq[1:],
+        duration=durs,
+        loop=0,
+        disposal=2,
+        optimize=False,
+    )
+
+
+def save_gif_optimized(imgs, durs, path, colors=256, max_kb=0):
+    frames, durs = dedupe_gif_frames(imgs, durs)
+    scales = [1.0]
+    if max_kb > 0:
+        scales = [1.0, 0.85, 0.7, 0.55, 0.4]
+    color_opts = [int(colors or 256)]
+    if max_kb > 0 and color_opts[0] >= 256:
+        color_opts = [256, 128, 64, 32]
+    best = None
+    for scale in scales:
+        seq = frames
+        if scale < 1.0:
+            seq = [
+                f.resize(
+                    (max(1, int(f.width * scale)), max(1, int(f.height * scale))),
+                    Image.LANCZOS,
+                )
+                for f in frames
+            ]
+        for c in color_opts:
+            _save_gif_frames(seq, durs, path, c)
+            size = os.path.getsize(path)
+            if best is None or size < best[0]:
+                best = (size, scale, c)
+            if max_kb <= 0 or size <= max_kb * 1024:
+                log(
+                    f"GIF сохранён: {round(size / 1024)} КБ, "
+                    f"кадров {len(seq)}, цветов {c if c < 256 else 'авто'}, "
+                    f"масштаб {int(scale * 100)}%"
+                )
+                return path
+    if best is not None:
+        # Пересохраняем лучший по размеру вариант, если целевой не достигнут.
+        scale = best[1]
+        seq = frames
+        if scale < 1.0:
+            seq = [
+                f.resize(
+                    (max(1, int(f.width * scale)), max(1, int(f.height * scale))),
+                    Image.LANCZOS,
+                )
+                for f in frames
+            ]
+        _save_gif_frames(seq, durs, path, best[2])
+        log(
+            f"GIF сохранён: {round(best[0] / 1024)} КБ "
+            f"(цель {max_kb} КБ не достигнута)"
+        )
+    return path
+
+
+def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, anim_options=None, gif_colors=256, gif_max_kb=0, snap_fps=0):
     spec = ANIMATIONS.get(anim_name)
     if not spec:
         raise RuntimeError(f"Неизвестная анимация: {anim_name}")
@@ -643,7 +1010,7 @@ def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, an
     order = list(range(frames))
     if opt.get("pingpong") and frames > 2:
         order = order + list(range(frames - 2, 0, -1))
-    durations = scaled_durations(anim_name, anim_options)
+    durations = snap_to_fps(scaled_durations(anim_name, anim_options), snap_fps)
     order_durations = [durations[i] for i in order]
     imgs = [
         sheet.crop(
@@ -655,15 +1022,7 @@ def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, an
     base = os.path.join(out_dir, f"{slugify(label)}-{anim_name}")
     if fmt == "gif":
         path = base + ".gif"
-        imgs[0].save(
-            path,
-            save_all=True,
-            append_images=imgs[1:],
-            duration=order_durations,
-            loop=0,
-            disposal=2,
-            optimize=False,
-        )
+        save_gif_optimized(imgs, order_durations, path, gif_colors, gif_max_kb)
     else:
         path = base + ".png"
         imgs[0].save(
@@ -675,6 +1034,60 @@ def export_animation(sheet, frame_w, frame_h, anim_name, fmt, out_dir, label, an
             loop=0,
         )
     return path
+
+
+def photo_to_gif(payload):
+    """Простая автоанимация из одного фото: покачивание и дыхание."""
+    import math as _math
+
+    src = payload.get("path") or ""
+    if not src or not os.path.exists(src):
+        raise RuntimeError("Фото не найдено")
+    frames = max(2, min(24, int(payload.get("frames") or 8)))
+    amp = max(0.0, min(12.0, float(payload.get("amplitude") or 3.0)))
+    max_side = max(64, min(1024, int(payload.get("maxSize") or 480)))
+    im = Image.open(src).convert("RGBA")
+    s = min(1.0, max_side / max(im.width, im.height))
+    if s < 1.0:
+        im = im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))), Image.LANCZOS)
+    pad = int(amp * 2 + 4)
+    canvas_w = im.width + pad * 2
+    canvas_h = im.height + pad * 2
+    out_frames = []
+    for i in range(frames):
+        ph = 2 * _math.pi * i / frames
+        rot = 1.5 * _math.sin(ph)
+        bob = amp * _math.sin(ph)
+        breath = 1.0 + 0.012 * _math.sin(ph + _math.pi / 2)
+        fr = im.resize(
+            (max(1, int(im.width * breath)), max(1, int(im.height * breath))),
+            Image.LANCZOS,
+        )
+        if rot:
+            fr = fr.rotate(rot, resample=Image.BICUBIC, expand=True)
+        cell = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        px = (canvas_w - fr.width) // 2
+        py = canvas_h - fr.height - pad + round(bob)
+        cell.alpha_composite(fr, (max(0, px), max(0, py)))
+        out_frames.append(cell)
+    out_dir = os.path.join(
+        os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(),
+        "PetSpriteBuilder",
+        "videocache",
+    )
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, "auto-" + uuid.uuid4().hex + ".gif")
+    dur = max(40, int(payload.get("duration") or 120))
+    out_frames[0].save(
+        out,
+        save_all=True,
+        append_images=out_frames[1:],
+        duration=[dur] * len(out_frames),
+        loop=0,
+        disposal=2,
+    )
+    log(f"Автоанимация: {frames} кадров, {out}")
+    return {"gif": out, "frames": len(out_frames)}
 
 
 def cutout_preview(path, bg):
@@ -695,7 +1108,8 @@ def cutout_preview(path, bg):
     Image.open(path).convert("RGBA").save(orig, "PNG")
     log(f"Оригинал сохранён за {round(time.time() - t0, 2)} с")
 
-    extra = f"{model or 'default'}|{int(alpha)}|{fg}|{bgt}|{erode}"
+    feather = int(bg.get("feather") or 0)
+    extra = f"{model or 'default'}|{int(alpha)}|{fg}|{bgt}|{erode}|{feather}"
     cached = cutout_cache_path(path, extra)
     if os.path.exists(cached):
         log(f"Кэш найден: {os.path.basename(cached)} ({round(time.time() - t0, 2)} с)")
@@ -861,6 +1275,37 @@ def fit_plain(im, fw, fh, frac=0.92):
     )
 
 
+def media_info(payload):
+    path = payload.get("path") or ""
+    if not path or not os.path.exists(path):
+        raise RuntimeError("Файл не найден")
+    im = Image.open(path)
+    w, h = im.size
+    n = getattr(im, "n_frames", 1) or 1
+    total = 0
+    if n > 1:
+        for i in range(n):
+            try:
+                im.seek(i)
+                total += max(20, int(im.info.get("duration") or 40))
+            except Exception:
+                break
+    avg = total / n if n else 0
+    try:
+        size = os.path.getsize(path)
+    except Exception:
+        size = 0
+    return {
+        "width": w,
+        "height": h,
+        "frames": n,
+        "durationMs": total,
+        "fps": round(1000.0 / avg, 2) if avg else 0,
+        "bytes": size,
+        "animated": n > 1,
+    }
+
+
 def sample_indices(n, k):
     if n <= k:
         return list(range(n))
@@ -906,11 +1351,22 @@ def video_to_gif(payload):
         raise RuntimeError("Видео не найдено")
     fps = max(1, min(30, int(payload.get("fps") or 15)))
     max_side = max(64, min(1024, int(payload.get("maxSize") or 480)))
+    start = max(0.0, float(payload.get("start") or 0))
+    end = float(payload.get("end") or 0)
+    if end and end <= start:
+        end = 0
+    boomerang = bool(payload.get("boomerang"))
+    preview = bool(payload.get("preview"))
+    if preview:
+        max_side = min(max_side, 240)
+        if not end or end - start > 3:
+            end = start + 3
     st = os.stat(src)
     key = hashlib.sha256(
-        f"{os.path.abspath(src)}|{st.st_mtime_ns}|{st.st_size}|{fps}|{max_side}".encode(
-            "utf-8"
-        )
+        (
+            f"{os.path.abspath(src)}|{st.st_mtime_ns}|{st.st_size}|{fps}|{max_side}"
+            f"|{start}|{end}|{int(boomerang)}|{int(preview)}"
+        ).encode("utf-8")
     ).hexdigest()[:24]
     out = os.path.join(video_cache_dir(), key + ".gif")
     if os.path.exists(out) and os.path.getsize(out) > 0:
@@ -920,20 +1376,42 @@ def video_to_gif(payload):
     if not exe:
         raise RuntimeError("ffmpeg не найден. Установите imageio-ffmpeg.")
 
-    log(f"Конвертация видео в GIF: {os.path.basename(src)} ({fps} fps, ≤{max_side}px)…")
-    palette = (
-        f"fps={fps},"
-        f"scale={max_side}:{max_side}:force_original_aspect_ratio=decrease:flags=lanczos,"
-        f"split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
-        f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+    log(
+        f"Конвертация видео в GIF: {os.path.basename(src)} ({fps} fps, ≤{max_side}px"
+        + (f", {start:g}–{end:g} с" if start or end else "")
+        + (", бумеранг" if boomerang else "")
+        + ")…"
     )
+    chain = []
+    if start or end:
+        chain.append(
+            f"trim=start={start:g}" + (f":end={end:g}" if end else "") + ",setpts=PTS-STARTPTS"
+        )
+    chain.append(f"fps={fps}")
+    chain.append(
+        f"scale={max_side}:{max_side}:force_original_aspect_ratio=decrease:flags=lanczos"
+    )
+    chain = ",".join(chain)
+    if boomerang:
+        graph = (
+            f"[0:v]{chain},split[f][b];[b]reverse[r];[f][r]concat=n=2:v=1:a=0,"
+            f"split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+            f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[out]"
+        )
+    else:
+        graph = (
+            f"[0:v]{chain},split[s0][s1];[s0]palettegen=stats_mode=diff[p];"
+            f"[s1][p]paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle[out]"
+        )
     cmd = [
         exe,
         "-y",
         "-i",
         src,
-        "-vf",
-        palette,
+        "-filter_complex",
+        graph,
+        "-map",
+        "[out]",
         "-loop",
         "0",
         out,
@@ -1065,7 +1543,8 @@ def gif_info(payload):
         raise RuntimeError("GIF не найден")
     im = Image.open(path)
     n = getattr(im, "n_frames", 1) or 1
-    idxs = sample_indices(n, COLS)
+    # Для ручного выбора кадров показываем все кадры (до разумного предела).
+    idxs = list(range(n)) if n <= 60 else sample_indices(n, 60)
     pdir = preview_dir()
     out = []
     for i in idxs:
@@ -1195,20 +1674,50 @@ def build_gif_pet(payload):
     animations = {}
     session_box = {"sessions": {}}
 
+    selections = payload.get("selections") or {}
+
     for name in present:
         row = ANIMATIONS[name]["row"]
         log(f"GIF: {name}…")
-        frames, durs = gif_frames(gifs[name], COLS)
-        durs = [max(120, d) for d in durs]
-        for i, fr in enumerate(frames):
-            if remove_bg:
-                model = bg.get("model") or ""
-                sessions = session_box["sessions"]
-                skey = model or "__default__"
-                if skey not in sessions:
-                    log(f"Загрузка модели ({model or 'default'})…")
-                    sessions[skey] = new_rembg_session(model)
-                fr = remove_bg_fast(fr, sessions[skey], bg)
+        sel = selections.get(name) or {}
+        picked = sel.get("frames")
+        if isinstance(picked, list) and picked:
+            frames, durs = gif_frames_at(gifs[name], picked[:COLS])
+            custom = sel.get("durs")
+            if isinstance(custom, list) and len(custom) == len(frames):
+                durs = [max(40, int(x)) for x in custom]
+        else:
+            frames, durs = gif_frames(gifs[name], COLS)
+        durs = snap_to_fps([max(120, d) for d in durs], payload.get("orcaFps"))
+
+        prepared = frames
+        if remove_bg:
+            model = bg.get("model") or ""
+            sessions = session_box["sessions"]
+            skey = model or "__default__"
+            if skey not in sessions:
+                log(f"Загрузка модели ({model or 'default'})…")
+                sessions[skey] = new_rembg_session(model)
+            session = sessions[skey]
+            if bool(bg.get("alphaMatting")):
+                prepared = [remove_bg_fast(fr, session, bg) for fr in frames]
+            else:
+                from PIL import ImageOps
+
+                imgs = [ImageOps.exif_transpose(fr).convert("RGBA") for fr in frames]
+                masks = []
+                for im in imgs:
+                    found = session.predict(im) or []
+                    if found:
+                        masks.append(found[0])
+                if masks and len(masks) == len(imgs):
+                    log(f"{name}: стабилизация маски по {len(masks)} кадрам")
+                    smooth = smooth_masks(masks)
+                    prepared = [composite_mask(im, m) for im, m in zip(imgs, smooth)]
+                else:
+                    prepared = imgs
+
+        for i, fr in enumerate(prepared):
             fr2 = fit_plain(fr.convert("RGBA"), fw, fh)
             cell = Image.new("RGBA", (fw, fh), (0, 0, 0, 0))
             px = (fw - fr2.width) // 2
@@ -1220,6 +1729,7 @@ def build_gif_pet(payload):
             "frames": len(frames),
             "frameDurationsMs": durs,
         }
+        log(f"{name}: готово")
 
     default = payload.get("defaultAnimation") or ""
     if default not in animations:
@@ -1282,6 +1792,12 @@ def run(payload):
         return list_pets(payload)
     if action == "bg-models":
         return list_bg_models()
+    if action == "download-bg-model":
+        return download_bg_model(payload)
+    if action == "models-info":
+        return models_info()
+    if action == "delete-bg-model":
+        return delete_bg_model(payload)
     if action == "clear-cutouts":
         return clear_cutouts()
     if action == "cutout-preview":
@@ -1297,8 +1813,18 @@ def run(payload):
         return list_bundles(payload)
     if action == "gif-info":
         return gif_info(payload)
+    if action == "media-info":
+        return media_info(payload)
     if action == "video-to-gif":
         return video_to_gif(payload)
+    if action == "video-preview":
+        return video_to_gif({**payload, "preview": True})
+    if action == "photo-to-gif":
+        return photo_to_gif(payload)
+    if action == "cache-info":
+        return cache_info()
+    if action == "clear-cache":
+        return clear_cache(payload)
 
     frame_w = int(payload.get("frameWidth") or 384)
     frame_h = int(payload.get("frameHeight") or 416)
@@ -1312,10 +1838,11 @@ def run(payload):
     webp_lossless = bool(payload.get("webpLossless", True))
     webp_quality = int(payload.get("webpQuality") or 95)
     disabled = payload.get("disabled") or []
+    snap_fps = int(payload.get("orcaFps") or 0)
 
     log("Сборка спрайт-листа…")
     sheet, animations, default_anim = build_sheet(
-        rows, frame_w, frame_h, transforms, consistent, bg, disabled, anim_options
+        rows, frame_w, frame_h, transforms, consistent, bg, disabled, anim_options, snap_fps
     )
     warnings = analyze_sheet(sheet, frame_w, frame_h, animations)
 
@@ -1338,13 +1865,68 @@ def run(payload):
         out_dir = default_out_dir()
     os.makedirs(out_dir, exist_ok=True)
 
+    if action == "estimate":
+        import io as _io
+
+        pb = _io.BytesIO()
+        sheet.save(pb, "PNG")
+        wb = _io.BytesIO()
+        if webp_lossless:
+            sheet.save(wb, "WEBP", lossless=True, method=4)
+        else:
+            sheet.save(wb, "WEBP", quality=webp_quality, method=4)
+        gif_sizes = {}
+        tmp_dir = preview_dir()
+        for name, info in animations.items():
+            row = info["row"]
+            frames = info["frames"]
+            durs = info.get("frameDurationsMs") or [120] * frames
+            imgs = [
+                sheet.crop(
+                    (i * frame_w, row * frame_h, (i + 1) * frame_w, (row + 1) * frame_h)
+                )
+                for i in range(frames)
+            ]
+            tmp = os.path.join(tmp_dir, f"estimate-{uuid.uuid4().hex}.gif")
+            try:
+                save_gif_optimized(
+                    imgs,
+                    durs,
+                    tmp,
+                    int(payload.get("gifColors") or 256),
+                    int(payload.get("gifMaxKb") or 0),
+                )
+                gif_sizes[name] = os.path.getsize(tmp)
+            finally:
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        return {
+            "pngBytes": pb.tell(),
+            "webpBytes": wb.tell(),
+            "gifs": gif_sizes,
+            "frameWidth": frame_w,
+            "frameHeight": frame_h,
+        }
+
     if action == "export-animation":
         anim = payload.get("animation") or default_anim
         fmt = payload.get("format") or "gif"
         if anim not in animations:
             raise RuntimeError(f"Анимация «{anim}» не собрана (нет фото или выключена)")
         path = export_animation(
-            sheet, frame_w, frame_h, anim, fmt, out_dir, label, anim_options
+            sheet,
+            frame_w,
+            frame_h,
+            anim,
+            fmt,
+            out_dir,
+            label,
+            anim_options,
+            int(payload.get("gifColors") or 256),
+            int(payload.get("gifMaxKb") or 0),
+            snap_fps,
         )
         return {"path": path, "warnings": warnings}
 

@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, net, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const DEFAULT_UPDATE_URL =
@@ -21,6 +22,9 @@ if (process.env.PSB_DEBUG) {
   } catch (_) {}
 }
 let win = null;
+let allowClose = false;
+let projectDirty = false;
+let overlayWin = null;
 
 function createWindow() {
   win = new BrowserWindow({
@@ -38,6 +42,28 @@ function createWindow() {
   });
   win.setMenuBarVisibility(false);
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  win.on('close', async (e) => {
+    if (allowClose || !projectDirty) return;
+    e.preventDefault();
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      title: 'Pet Sprite Builder',
+      message: 'Сохранить проект перед закрытием?',
+      detail:
+        'Черновик сохраняется автоматически, но именованный файл проекта — нет. Можно сохранить и закрыть или выйти без сохранения.',
+      buttons: ['Сохранить проект', 'Выйти без сохранения', 'Отмена'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+    });
+    if (response === 0) {
+      win.webContents.send('request-save-and-close');
+    } else if (response === 1) {
+      allowClose = true;
+      win.close();
+    }
+  });
 
   if (process.env.PET_SMOKE) {
     win.webContents.on('console-message', (_e, level, message) => {
@@ -80,13 +106,13 @@ ipcMain.handle('select-image', async () => {
       { name: 'Все файлы', extensions: ['*'] },
     ],
   });
-  return res.canceled ? null : res.filePaths[0];
+  return res.canceled ? null : importMediaFile(res.filePaths[0]);
 });
 
 ipcMain.handle('paste-image', async () => {
   const img = clipboard.readImage();
   if (img.isEmpty()) return null;
-  const p = path.join(appTempDir(), `pet-paste-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
+  const p = path.join(projectSourcesDir(), `paste-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
   fs.writeFileSync(p, img.toPNG());
   return p;
 });
@@ -97,7 +123,7 @@ ipcMain.handle('select-images', async () => {
     properties: ['openFile', 'multiSelections'],
     filters: [{ name: 'Анимации и видео', extensions: ['gif', 'webp', 'png', 'apng', 'mp4', 'm4v', 'mov', 'webm', 'mkv', 'avi'] }],
   });
-  return res.canceled ? [] : res.filePaths;
+  return res.canceled ? [] : res.filePaths.map(importMediaFile);
 });
 
 ipcMain.handle('zip-folder', async (event, payload) => {
@@ -131,7 +157,14 @@ ipcMain.handle('select-dir', async () => {
 });
 
 ipcMain.handle('open-dir', async (_e, dir) => {
-  if (dir && fs.existsSync(dir)) await shell.openPath(dir);
+  if (!dir) return { ok: false, error: 'Нет пути' };
+  if (!fs.existsSync(dir)) return { ok: false, error: 'Папка не найдена' };
+  try {
+    const err = await shell.openPath(dir);
+    return err ? { ok: false, error: err } : { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 function backendLog(msg) {
@@ -140,6 +173,8 @@ function backendLog(msg) {
     fs.appendFileSync(path.join(app.getPath('userData'), 'backend.log'), line, 'utf-8');
   } catch (_) {}
 }
+
+const cancellableBuilds = new Set();
 
 function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
   const action = payload && payload.action;
@@ -151,6 +186,7 @@ function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
     const finish = (res) => {
       if (done) return;
       done = true;
+      try { if (child) cancellableBuilds.delete(child); } catch (_) {}
       if (timer) clearTimeout(timer);
       try { if (tmp) fs.unlinkSync(tmp); } catch (_) {}
       if (!res.ok) backendLog(`action ${action} failed: ${res.error}`);
@@ -166,6 +202,9 @@ function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
         windowsHide: true,
         env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
       });
+      if (action == null || ['build', 'preview', 'export-animation', 'gif-bundle', 'photo-to-gif'].includes(action)) {
+        cancellableBuilds.add(child);
+      }
     } catch (e) {
       backendLog(`action ${action} spawn error: ${e && e.stack ? e.stack : e}`);
       finish({ ok: false, error: `Не удалось запустить бэкенд: ${e.message}` });
@@ -211,6 +250,18 @@ function runBackend(payload, onLog, { timeoutMs = 10 * 60 * 1000 } = {}) {
   });
 }
 
+ipcMain.handle('cancel-build', async () => {
+  let n = 0;
+  for (const child of Array.from(cancellableBuilds)) {
+    try {
+      child.kill();
+      n++;
+    } catch (_) {}
+    cancellableBuilds.delete(child);
+  }
+  return { ok: true, cancelled: n };
+});
+
 ipcMain.handle('build', async (event, payload) => {
   return runBackend(payload, (line) => event.sender.send('build-log', line));
 });
@@ -225,6 +276,12 @@ ipcMain.handle('preview', async (event, payload) => {
   );
 });
 
+ipcMain.handle('estimate', async (event, payload) => {
+  return runBackend({ ...payload, action: 'estimate' }, (line) =>
+    event.sender.send('build-log', line)
+  );
+});
+
 ipcMain.handle('export-animation', async (event, payload) => {
   return runBackend({ ...payload, action: 'export-animation' }, (line) =>
     event.sender.send('build-log', line)
@@ -232,11 +289,127 @@ ipcMain.handle('export-animation', async (event, payload) => {
 });
 
 ipcMain.handle('bg-models', async () => {
-  return runBackend({ action: 'bg-models' });
+  return runBackend({ action: 'bg-models' }, null, { timeoutMs: 120000 });
+});
+
+ipcMain.handle('delete-bg-model', async (event, payload) => {
+  return runBackend({ ...(payload || {}), action: 'delete-bg-model' }, (line) =>
+    event.sender.send('build-log', line)
+  );
+});
+
+ipcMain.handle('models-info', async () => {
+  return runBackend({ action: 'models-info' });
+});
+
+ipcMain.handle('download-bg-model', async (event, payload) => {
+  return runBackend({ ...(payload || {}), action: 'download-bg-model' }, (line) =>
+    event.sender.send('build-log', line)
+  , { timeoutMs: 60 * 60 * 1000 });
 });
 
 ipcMain.handle('clear-cutouts', async () => {
   return runBackend({ action: 'clear-cutouts' });
+});
+
+ipcMain.handle('cache-info', async () => {
+  return runBackend({ action: 'cache-info' });
+});
+
+ipcMain.handle('media-info', async (_e, payload) => {
+  return runBackend({ ...(payload || {}), action: 'media-info' });
+});
+
+ipcMain.handle('clear-draft', async () => {
+  try {
+    if (fs.existsSync(draftPath())) fs.unlinkSync(draftPath());
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('show-overlay', async (_e, data) => {
+  try {
+    if (overlayWin && !overlayWin.isDestroyed()) {
+      overlayWin.close();
+      overlayWin = null;
+    }
+    const frameW = Number(data.frameWidth) || 384;
+    const frameH = Number(data.frameHeight) || 416;
+    const pet = Number(data.petSize) || frameH;
+    const scale = pet / frameH;
+    const w = Math.max(40, Math.round(frameW * scale));
+    const h = Math.max(40, Math.round(pet));
+    overlayWin = new BrowserWindow({
+      width: w,
+      height: h,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      resizable: false,
+      hasShadow: false,
+      focusable: true,
+      fullscreenable: false,
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    overlayWin.setAlwaysOnTop(true, 'screen-saver');
+    try {
+      const { workArea } = screen.getPrimaryDisplay();
+      overlayWin.setPosition(
+        Math.round(workArea.x + workArea.width - w - 24),
+        Math.round(workArea.y + workArea.height - h - 24)
+      );
+    } catch (_) {}
+    overlayWin.loadFile(path.join(__dirname, 'renderer', 'overlay.html'));
+    overlayWin.webContents.on('did-finish-load', () => {
+      if (!overlayWin || overlayWin.isDestroyed()) return;
+      overlayWin.webContents.send('overlay-data', {
+        ...data,
+        frameWidth: frameW,
+        frameHeight: frameH,
+        petSize: pet,
+        scale,
+        width: w,
+        height: h,
+      });
+    });
+    overlayWin.on('closed', () => {
+      overlayWin = null;
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('close-overlay', async () => {
+  if (overlayWin && !overlayWin.isDestroyed()) overlayWin.close();
+  overlayWin = null;
+  return { ok: true };
+});
+
+ipcMain.handle('video-preview', async (event, payload) => {
+  return runBackend({ ...(payload || {}), action: 'video-preview' }, (line) =>
+    event.sender.send('build-log', line)
+  );
+});
+
+ipcMain.handle('photo-to-gif', async (event, payload) => {
+  return runBackend({ ...(payload || {}), action: 'photo-to-gif' }, (line) =>
+    event.sender.send('build-log', line)
+  );
+});
+
+ipcMain.handle('clear-cache', async (event, payload) => {
+  return runBackend({ ...(payload || {}), action: 'clear-cache' }, (line) =>
+    event.sender.send('build-log', line)
+  );
 });
 
 ipcMain.handle('cutout-preview', async (event, payload) => {
@@ -251,19 +424,34 @@ ipcMain.handle('gif-bundle', async (event, payload) => {
   );
 });
 
+function readBundleDir(dir) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'pet.json'), 'utf-8'));
+  let sources = null;
+  const sp = path.join(dir, 'sources.json');
+  if (fs.existsSync(sp)) sources = JSON.parse(fs.readFileSync(sp, 'utf-8'));
+  return { ok: true, manifest, sources, dir };
+}
+
 ipcMain.handle('import-bundle', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Открыть bundle питомца',
+    defaultPath: defaultBundleDir(),
     properties: ['openDirectory'],
   });
   if (res.canceled || !res.filePaths[0]) return { ok: false, canceled: true };
   const dir = res.filePaths[0];
+  writeUiPrefs({ bundleDir: path.dirname(dir) });
   try {
-    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'pet.json'), 'utf-8'));
-    let sources = null;
-    const sp = path.join(dir, 'sources.json');
-    if (fs.existsSync(sp)) sources = JSON.parse(fs.readFileSync(sp, 'utf-8'));
-    return { ok: true, manifest, sources, dir };
+    return readBundleDir(dir);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('open-bundle-path', async (_e, dir) => {
+  if (!dir || !fs.existsSync(dir)) return { ok: false, error: 'Папка bundle не найдена' };
+  try {
+    return readBundleDir(dir);
   } catch (e) {
     return { ok: false, error: e.message };
   }
@@ -273,6 +461,83 @@ function draftPath() {
   return path.join(app.getPath('userData'), 'draft.json');
 }
 
+function uiPrefsPath() {
+  return path.join(app.getPath('userData'), 'ui-prefs.json');
+}
+
+function readUiPrefs() {
+  try {
+    return JSON.parse(fs.readFileSync(uiPrefsPath(), 'utf-8')) || {};
+  } catch (_) {
+    return {};
+  }
+}
+
+function writeUiPrefs(patch) {
+  try {
+    const cur = readUiPrefs();
+    fs.writeFileSync(uiPrefsPath(), JSON.stringify({ ...cur, ...patch }, null, 2), 'utf-8');
+  } catch (_) {}
+}
+
+function installDir() {
+  return app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname;
+}
+
+function defaultProjectDir() {
+  return installDir();
+}
+
+function defaultBundleDir() {
+  const prefs = readUiPrefs();
+  if (prefs.bundleDir && fs.existsSync(prefs.bundleDir)) return prefs.bundleDir;
+  const d = path.join(process.env.LOCALAPPDATA || app.getPath('userData'), 'PetSpriteBuilder', 'bundles');
+  return fs.existsSync(d) ? d : app.getPath('documents');
+}
+
+function projectSourcesDir() {
+  const dir = path.join(defaultProjectDir(), 'sources');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {}
+  return dir;
+}
+
+function isPathInside(child, parent) {
+  const rel = path.relative(path.resolve(parent), path.resolve(child));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function fileFingerprint(p) {
+  const st = fs.statSync(p);
+  if (st.size > 50 * 1024 * 1024) return String(st.size);
+  return st.size + ':' + crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex');
+}
+
+function importMediaFile(src) {
+  if (!src || typeof src !== 'string') return src;
+  try {
+    if (!fs.existsSync(src) || !fs.statSync(src).isFile()) return src;
+    const dir = projectSourcesDir();
+    if (isPathInside(src, dir)) return src;
+    const ext = path.extname(src);
+    const base = path.basename(src, ext);
+    const fingerprint = fileFingerprint(src);
+    let dest = path.join(dir, base + ext);
+    let i = 1;
+    while (fs.existsSync(dest)) {
+      if (fileFingerprint(dest) === fingerprint) return dest;
+      dest = path.join(dir, `${base}-${i++}${ext}`);
+    }
+    fs.copyFileSync(src, dest);
+    return dest;
+  } catch (_) {
+    return src;
+  }
+}
+
+ipcMain.handle('import-file', async (_e, src) => importMediaFile(src));
+
 ipcMain.handle('save-draft', async (_e, data) => {
   try {
     fs.writeFileSync(draftPath(), JSON.stringify(data), 'utf-8');
@@ -280,6 +545,17 @@ ipcMain.handle('save-draft', async (_e, data) => {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+});
+
+ipcMain.handle('set-dirty', async (_e, dirty) => {
+  projectDirty = !!dirty;
+  return { ok: true };
+});
+
+ipcMain.handle('confirm-close', async () => {
+  allowClose = true;
+  if (win) win.close();
+  return { ok: true };
 });
 
 ipcMain.handle('load-draft', async () => {
@@ -294,21 +570,24 @@ ipcMain.handle('load-draft', async () => {
 ipcMain.handle('save-project', async (_e, data) => {
   const res = await dialog.showSaveDialog(win, {
     title: 'Сохранить проект',
-    defaultPath: 'pet-project.json',
+    defaultPath: path.join(defaultProjectDir(), 'pet-project.json'),
     filters: [{ name: 'Проект питомца', extensions: ['json'] }],
   });
   if (res.canceled || !res.filePath) return { ok: false, canceled: true };
   fs.writeFileSync(res.filePath, JSON.stringify(data, null, 2), 'utf-8');
+  writeUiPrefs({ projectDir: path.dirname(res.filePath) });
   return { ok: true, path: res.filePath };
 });
 
 ipcMain.handle('open-project', async () => {
   const res = await dialog.showOpenDialog(win, {
     title: 'Открыть проект',
+    defaultPath: defaultProjectDir(),
     properties: ['openFile'],
     filters: [{ name: 'Проект питомца', extensions: ['json'] }],
   });
   if (res.canceled || !res.filePaths[0]) return { ok: false, canceled: true };
+  writeUiPrefs({ projectDir: path.dirname(res.filePaths[0]) });
   try {
     const data = JSON.parse(fs.readFileSync(res.filePaths[0], 'utf-8'));
     return { ok: true, project: data };
@@ -338,6 +617,15 @@ ipcMain.handle('get-recents', async () => {
     return Array.isArray(arr) ? arr : [];
   } catch (_) {
     return [];
+  }
+});
+
+ipcMain.handle('clear-recents', async () => {
+  try {
+    fs.writeFileSync(recentsPath(), '[]', 'utf-8');
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 });
 
@@ -600,13 +888,29 @@ ipcMain.handle('download-update', async (_e, url) => {
     if (size < 1000000) {
       throw new Error('Файл слишком маленький (' + size + ' байт), похоже на ошибку');
     }
-    const openErr = await shell.openPath(dest);
-    if (openErr) {
-      return { ok: false, error: 'Скачано, но не запустилось: ' + openErr, path: dest };
-    }
-    return { ok: true, path: dest };
+    return { ok: true, path: dest, size };
   } catch (e) {
     return { ok: false, error: errText(e), path: dest };
+  }
+});
+
+ipcMain.handle('install-update', async (_e, installerPath) => {
+  if (!installerPath || !fs.existsSync(installerPath)) {
+    return { ok: false, error: 'Установщик не найден' };
+  }
+  try {
+    const child = spawn(installerPath, ['/S'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      env: { ...process.env, PSB_RELAUNCH: '1' },
+    });
+    child.unref();
+    allowClose = true;
+    setTimeout(() => app.quit(), 900);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: errText(e) };
   }
 });
 

@@ -15,6 +15,12 @@
   Pop $0
   nsExec::ExecToLog 'icacls "$LOCALAPPDATA\PetSpriteBuilder" /setintegritylevel (OI)(CI)Medium /T /C'
   Pop $0
+
+  ; Автообновление: перезапускаем приложение после тихой установки.
+  ReadEnvStr $0 "PSB_RELAUNCH"
+  StrCmp $0 "1" 0 psb_no_relaunch
+  Exec '"$INSTDIR\Pet Sprite Builder.exe"'
+  psb_no_relaunch:
 !macroend
 
 !macro customUnInstall
